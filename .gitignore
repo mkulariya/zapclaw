@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+/dist/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime directories
+safepincer_workspace/
+certs/
+
+# Environment
+.env
+.env.local
+
+# Memory database
+*.db
+
+# PyO3/Python artifacts (if used in future)
+__pycache__/
+*.pyc
+.venv/
