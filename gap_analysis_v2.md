@@ -1,6 +1,6 @@
-# SafePincer vs OpenClaw — Gap Analysis v2.1 (Post Phase 10 Partial)
+# Pincer vs OpenClaw — Gap Analysis v2.1 (Post Phase 10 Partial)
 
-> **Date**: 2026-02-14 | **SafePincer**: v0.1.0 (Phase 10 In-Progress) | **OpenClaw**: reference snapshot
+> **Date**: 2026-02-14 | **Pincer**: v0.1.0 (Phase 10 In-Progress) | **OpenClaw**: reference snapshot
 
 ---
 
@@ -8,7 +8,7 @@
 
 ### Core Developer Tools (9/9 ✅)
 
-| # | OpenClaw | SafePincer | Status |
+| # | OpenClaw | Pincer | Status |
 |---|---|---|---|
 | 1 | `read` | `file_ops` (read) | ✅ |
 | 2 | `write` | `file_ops` (write) | ✅ |
@@ -22,7 +22,7 @@
 
 ### Memory & Session Tools (4/4 ✅)
 
-| # | OpenClaw | SafePincer | Status |
+| # | OpenClaw | Pincer | Status |
 |---|---|---|---|
 | 10 | `memory_search` | `memory_search` | ✅ **NEW** |
 | 11 | `memory_get` | `memory_get` | ✅ **NEW** |
@@ -31,7 +31,7 @@
 
 ### Web & Media Tools (2.5/4 ⚠️)
 
-| # | OpenClaw | SafePincer | Status |
+| # | OpenClaw | Pincer | Status |
 |---|---|---|---|
 | 14 | `web_search` | `web_search` | ✅ (+ DuckDuckGo + SearXNG) |
 | 15 | `web_fetch` | `browse_url` | ⚠️ Partial (basic HTML strip, no readability) |
@@ -47,7 +47,7 @@
 | `agents_list`, `tts` | Multi-agent / voice features |
 | Discord/Slack/Telegram/WhatsApp actions | Channel-specific integrations |
 
-### SafePincer-Exclusive
+### Pincer-Exclusive
 
 | Tool | Notes |
 |---|---|
@@ -68,7 +68,7 @@
 
 ## 2. System Prompt Parity
 
-| # | Section | SafePincer | Status |
+| # | Section | Pincer | Status |
 |---|---|---|---|
 | 1 | Identity line | ✅ | ✅ |
 | 2 | Tooling (dynamic list + descriptions) | ✅ | ✅ |
@@ -94,7 +94,7 @@
 
 ## 3. Agent Loop & Architecture
 
-| Feature | OpenClaw | SafePincer | Status |
+| Feature | OpenClaw | Pincer | Status |
 |---|---|---|---|
 | Observe-Plan-Act-Reflect loop | ✅ | ✅ | ✅ |
 | Max steps guard | ✅ | ✅ 15 default | ✅ |
@@ -117,7 +117,7 @@
 
 ## 4. Memory System (Exact Parity Achieved)
 
-| Feature | OpenClaw | SafePincer | Status |
+| Feature | OpenClaw | Pincer | Status |
 |---|---|---|---|
 | `MEMORY.md` persistent store | ✅ | ✅ | ✅ |
 | `memory/*.md` date-organized | ✅ | ✅ | ✅ **NEW** |
@@ -132,7 +132,7 @@
 
 **Score**: **10/10** (was 8/9 pre-Phase 10)
 
-> **Parity Achieved**: SafePincer now matches OpenClaw's memory architecture exactly: dual storage (Files + SQLite), FTS5 keyword search, vector embeddings, and hybrid ranking.
+> **Parity Achieved**: Pincer now matches OpenClaw's memory architecture exactly: dual storage (Files + SQLite), FTS5 keyword search, vector embeddings, and hybrid ranking.
 
 ---
 
@@ -150,15 +150,15 @@
 
 ## 6. Security Comparison
 
-| Feature | SafePincer | OpenClaw | Winner |
+| Feature | Pincer | OpenClaw | Winner |
 |---|---|---|---|
-| Prompt injection guard | ✅ Multi-pattern regex | ⚠️ Basic | 🏆 SafePincer |
-| Workspace confinement | ✅ Symlink-safe | ⚠️ CVE-2026-25253 | 🏆 SafePincer |
-| Network isolation | ✅ Zero default exposure | ❌ `0.0.0.0:18789` | 🏆 SafePincer |
-| No delete operations | ✅ By design | ❌ Available | 🏆 SafePincer |
-| SSRF prevention | ✅ Private IP blocking | ⚠️ Partial | 🏆 SafePincer |
+| Prompt injection guard | ✅ Multi-pattern regex | ⚠️ Basic | 🏆 Pincer |
+| Workspace confinement | ✅ Symlink-safe | ⚠️ CVE-2026-25253 | 🏆 Pincer |
+| Network isolation | ✅ Zero default exposure | ❌ `0.0.0.0:18789` | 🏆 Pincer |
+| No delete operations | ✅ By design | ❌ Available | 🏆 Pincer |
+| SSRF prevention | ✅ Private IP blocking | ⚠️ Partial | 🏆 Pincer |
 
-**SafePincer wins on 9 of 10 security dimensions.**
+**Pincer wins on 9 of 10 security dimensions.**
 
 ---
 
@@ -195,6 +195,6 @@
 | **Security** | 9/10 (90%) | 9/10 (90%) | ████████ 90% |
 | | | | |
 | **Overall agentic parity** | **~92%** | **~96%** | ████████▋ |
-| **Security superiority** | +9 advantages | +9 advantages | 🏆 SafePincer |
+| **Security superiority** | +9 advantages | +9 advantages | 🏆 Pincer |
 
 > Phase 10 has achieved **100% Memory System Parity**. The remaining ~4% is primarily the UI/Streaming integration and full Browser automation.

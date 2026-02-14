@@ -14,6 +14,7 @@
 Thumbs.db
 
 # Runtime directories
+pincer_workspace/
 safepincer_workspace/
 certs/
 
@@ -28,3 +29,12 @@ certs/
 __pycache__/
 *.pyc
 .venv/
+
+# Reference and documentation files
+openclaw_reference/
+CHAT.md
+CLAUDE.md
+pincer.md
+task.md
+gap_analysis_v2.md
+incomplete_features_analysis.md

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SafePincer mTLS Certificate Generator
+# Pincer mTLS Certificate Generator
 # Generates self-signed certificates for outbound/inbound tunnel mTLS.
 #
 # Usage: ./scripts/gen_certs.sh [output_dir]
@@ -10,11 +10,11 @@ set -euo pipefail
 OUTPUT_DIR="${1:-./certs}"
 DAYS=365
 KEY_SIZE=4096
-CN_CA="SafePincer CA"
-CN_SERVER="safepincer-server"
-CN_CLIENT="safepincer-client"
+CN_CA="Pincer CA"
+CN_SERVER="pincer-server"
+CN_CLIENT="pincer-client"
 
-echo "🔐 SafePincer Certificate Generator"
+echo "🔐 Pincer Certificate Generator"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Output:  $OUTPUT_DIR"
 echo "  Validity: $DAYS days"
@@ -32,7 +32,7 @@ openssl req -new -x509 \
     -key "$OUTPUT_DIR/ca-key.pem" \
     -out "$OUTPUT_DIR/ca-cert.pem" \
     -days "$DAYS" \
-    -subj "/CN=$CN_CA/O=SafePincer/OU=Security" \
+    -subj "/CN=$CN_CA/O=Pincer/OU=Security" \
     2>/dev/null
 
 # --- 2. Generate server certificate ---
@@ -41,7 +41,7 @@ openssl genrsa -out "$OUTPUT_DIR/server-key.pem" "$KEY_SIZE" 2>/dev/null
 openssl req -new \
     -key "$OUTPUT_DIR/server-key.pem" \
     -out "$OUTPUT_DIR/server.csr" \
-    -subj "/CN=$CN_SERVER/O=SafePincer/OU=Server" \
+    -subj "/CN=$CN_SERVER/O=Pincer/OU=Server" \
     2>/dev/null
 
 # Server extensions (SAN for localhost)
@@ -53,7 +53,7 @@ extendedKeyUsage = serverAuth
 
 [alt_names]
 DNS.1 = localhost
-DNS.2 = safepincer
+DNS.2 = pincer
 IP.1 = 127.0.0.1
 IP.2 = ::1
 EOF
@@ -75,7 +75,7 @@ openssl genrsa -out "$OUTPUT_DIR/client-key.pem" "$KEY_SIZE" 2>/dev/null
 openssl req -new \
     -key "$OUTPUT_DIR/client-key.pem" \
     -out "$OUTPUT_DIR/client.csr" \
-    -subj "/CN=$CN_CLIENT/O=SafePincer/OU=Client" \
+    -subj "/CN=$CN_CLIENT/O=Pincer/OU=Client" \
     2>/dev/null
 
 openssl x509 -req \
@@ -107,7 +107,7 @@ echo "  ├── client-cert.pem   (Client certificate)"
 echo "  └── client-key.pem    (Client private key) ⚠️  KEEP SECURE"
 echo ""
 echo "  Usage:"
-echo "    safepincer --client-cert $OUTPUT_DIR/client-cert.pem \\"
+echo "    pincer --client-cert $OUTPUT_DIR/client-cert.pem \\"
 echo "              --client-key  $OUTPUT_DIR/client-key.pem \\"
 echo "              --ca-cert     $OUTPUT_DIR/ca-cert.pem"
 echo ""

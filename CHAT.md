@@ -1,9 +1,9 @@
 # Chat Summary: Exact OpenClaw Parity Implementation
 
-In this session, we focused on bringing SafePincer to exact feature parity with OpenClaw, specifically targeting the Memory System, Streaming capabilities, and Web Readability.
+In this session, we focused on bringing Pincer to exact feature parity with OpenClaw, specifically targeting the Memory System, Streaming capabilities, and Web Readability.
 
-## 1. Description of SafePincer
-SafePincer is a secure, high-performance, lightweight AI agent framework written in Rust. It serves as a safer, more efficient alternative to OpenClaw's Node.js architecture. Key architectural distinctions include:
+## 1. Description of Pincer
+Pincer is a secure, high-performance, lightweight AI agent framework written in Rust. It serves as a safer, more efficient alternative to OpenClaw's Node.js architecture. Key architectural distinctions include:
 - **Strict Sandboxing:** Filesystem and network access are tightly controlled.
 - **Type Safety:** Core logic is implemented in Rust for robustness and performance.
 - **Resource Efficiency:** Uses minimal memory footprint compared to Node.js.
@@ -12,7 +12,7 @@ SafePincer is a secure, high-performance, lightweight AI agent framework written
 ## 2. Completed Work
 We have successfully implemented the core infrastructure for exact parity:
 
-### Memory System (`safepincer-core/src/memory.rs`)
+### Memory System (`pincer-core/src/memory.rs`)
 - **Dual Storage Architecture:** Implemented file-based storage (`MEMORY.md`, `memory/*.md`) synced with a SQLite index database (`memory.db`), matching OpenClaw exactly.
 - **Schema:** Created `meta`, `files`, `chunks`, `chunks_fts` (FTS5), and `embedding_cache` tables.
 - **Chunking:** Ported markdown chunking logic with configurable token limits and overlap.
@@ -23,7 +23,7 @@ We have successfully implemented the core infrastructure for exact parity:
     3.  **Weighted Merge:** Combines results intelligently.
 - **Embedding Provider:** Added an `EmbeddingProvider` struct to interact with `/embeddings` endpoints, complete with batching and caching.
 
-### Streaming Client (`safepincer-core/src/llm.rs`)
+### Streaming Client (`pincer-core/src/llm.rs`)
 - **API Extension:** Added `StreamChunk` enum (`TextDelta`, `ToolCallDelta`, `Done`) and `complete_stream` to the `LlmClient` trait.
 - **SSE Implementation:** Implemented robust Server-Sent Events (SSE) parsing in `OpenAiCompatibleClient`. It handles:
     - `data: {...}` event parsing.
@@ -36,14 +36,14 @@ While the core logic is implemented, the integration into the Agent and CLI laye
 
 | Feature | Component | Status | Verification |
 | :--- | :--- | :--- | :--- |
-| **Memory Logic** | `safepincer-core/src/memory.rs` | **DONE** | Compiles successfully. Unit tests cover storage, retrieval, chunking, and search. |
-| **Streaming Client** | `safepincer-core/src/llm.rs` | **DONE** | Compiles. `complete_stream` handles SSE correctly. |
-| **Streaming Agent** | `safepincer-core/src/agent.rs` | **PENDING** | Need to add `run_stream` method to the `Agent` struct to expose the streaming capability. |
-| **Streaming CLI** | `safepincer-cli/src/main.rs` | **PENDING** | CLI needs to be updated to consume the stream and print tokens in real-time. |
-| **Readability** | `safepincer-tools/src/browser_tool.rs` | **PENDING** | Basic HTML stripping exists. Need to enhance this to convert HTML structure (headers, links) to Markdown, closer to Mozilla Readability. |
+| **Memory Logic** | `pincer-core/src/memory.rs` | **DONE** | Compiles successfully. Unit tests cover storage, retrieval, chunking, and search. |
+| **Streaming Client** | `pincer-core/src/llm.rs` | **DONE** | Compiles. `complete_stream` handles SSE correctly. |
+| **Streaming Agent** | `pincer-core/src/agent.rs` | **PENDING** | Need to add `run_stream` method to the `Agent` struct to expose the streaming capability. |
+| **Streaming CLI** | `pincer-cli/src/main.rs` | **PENDING** | CLI needs to be updated to consume the stream and print tokens in real-time. |
+| **Readability** | `pincer-tools/src/browser_tool.rs` | **PENDING** | Basic HTML stripping exists. Need to enhance this to convert HTML structure (headers, links) to Markdown, closer to Mozilla Readability. |
 
 ## 4. Next Steps
 1.  **Enhance Web Fetch:** Upgrade `browser_tool.rs` to convert HTML to Markdown (headers, links, lists) instead of just stripping tags.
-2.  **SafePincer Core Update:** Update `agent.rs` to use `complete_stream` and handle reasoning tag stripping (`<think>...</think>`).
+2.  **Pincer Core Update:** Update `agent.rs` to use `complete_stream` and handle reasoning tag stripping (`<think>...</think>`).
 3.  **CLI Integration:** Update `main.rs` to use the streaming agent method and display output.
 4.  **Final Verification:** Run `cargo build` and verify all features with a live test.

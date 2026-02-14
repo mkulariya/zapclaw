@@ -1,12 +1,12 @@
-# SafePincer 🦞
+# Pincer 🦞
 
 **Secure, Lightweight, High-Performance AI Agent**
 
-A security-first clone of OpenClaw, built in Rust. SafePincer retains >95% of OpenClaw's utility while eliminating all known security vulnerabilities.
+A security-first clone of OpenClaw, built in Rust. Pincer retains >95% of OpenClaw's utility while eliminating all known security vulnerabilities.
 
 ---
 
-## Why SafePincer?
+## Why Pincer?
 
 OpenClaw has critical security issues:
 - **CVE-2026-25253**: 1-click RCE via attacker-controlled content
@@ -14,11 +14,11 @@ OpenClaw has critical security issues:
 - **Prompt injection** vulnerability ("lethal trifecta")
 - **Bloated dependencies**: 385KB lockfile, 60+ npm packages
 
-SafePincer fixes all of these while staying lightweight and fast.
+Pincer fixes all of these while staying lightweight and fast.
 
 ## Features
 
-| Feature | SafePincer | OpenClaw |
+| Feature | Pincer | OpenClaw |
 |---|---|---|
 | Language | Rust | Node.js/TypeScript |
 | Binary size | ~15MB | ~500MB+ (with node_modules) |
@@ -42,8 +42,8 @@ SafePincer fixes all of these while staying lightweight and fast.
 
 ```bash
 # Clone
-git clone https://github.com/your-org/safepincer.git
-cd safepincer
+git clone https://github.com/your-org/pincer.git
+cd pincer
 
 # Build
 cargo build --release
@@ -52,37 +52,37 @@ cargo build --release
 ollama pull phi3:mini
 
 # Run interactive REPL
-./target/release/safepincer
+./target/release/pincer
 
 # Or run a single task
-./target/release/safepincer --task "What is sqrt(144) + 3^2?"
+./target/release/pincer --task "What is sqrt(144) + 3^2?"
 ```
 
 ### Cloud LLM Mode
 
 ```bash
-export SAFEPINCER_API_KEY="sk-your-key"
-./target/release/safepincer --model-mode cloud --model-name gpt-4o
+export PINCER_API_KEY="sk-your-key"
+./target/release/pincer --model-mode cloud --model-name gpt-4o
 ```
 
 ## Architecture
 
 ```
-safepincer/
-├── safepincer-core/       # Core agent runtime
+pincer/
+├── pincer-core/       # Core agent runtime
 │   ├── agent.rs           # Observe-Plan-Act-Reflect loop
 │   ├── llm.rs             # OpenAI-compatible client (Ollama + Cloud)
 │   ├── memory.rs          # SQLite session memory (4K token limit)
 │   ├── sanitizer.rs       # Prompt injection guard
 │   ├── confiner.rs        # Workspace path confinement
 │   └── config.rs          # Env-var based configuration
-├── safepincer-tools/      # Safe tool implementations
+├── pincer-tools/      # Safe tool implementations
 │   ├── math_tool.rs       # Pure Rust math evaluator
 │   ├── file_tool.rs       # Workspace-confined file I/O
 │   ├── browser_tool.rs    # Read-only HTTP browser
 │   └── confirmation.rs    # Human-in-the-loop confirmation
-├── safepincer-cli/        # CLI binary (REPL + single-task)
-├── safepincer-tunnels/    # Secure communication
+├── pincer-cli/        # CLI binary (REPL + single-task)
+├── pincer-tunnels/    # Secure communication
 │   ├── outbound.rs        # HTTPS proxy (mTLS, rate limiting)
 │   └── inbound.rs         # JSON-RPC 2.0 server
 └── scripts/
@@ -115,16 +115,16 @@ The browser tool blocks all private/local network addresses:
 ## CLI Options
 
 ```
-SafePincer 🦞 — Secure, lightweight AI agent
+Pincer 🦞 — Secure, lightweight AI agent
 
-Usage: safepincer [OPTIONS]
+Usage: pincer [OPTIONS]
 
 Options:
-  -w, --workspace <DIR>      Workspace directory [default: ./safepincer_workspace]
+  -w, --workspace <DIR>      Workspace directory [default: ./pincer_workspace]
   -m, --model-mode <MODE>    LLM mode: "local" or "cloud" [default: local]
   -n, --model-name <NAME>    Model name [default: phi3:mini]
       --api-url <URL>        API base URL
-      --api-key <KEY>        API key [env: SAFEPINCER_API_KEY]
+      --api-key <KEY>        API key [env: PINCER_API_KEY]
       --max-steps <N>        Max agent steps per task [default: 15]
   -t, --task <TASK>          Run single task and exit
       --no-confirm           Disable confirmation prompts
@@ -136,13 +136,13 @@ Options:
 
 | Variable | Description | Default |
 |---|---|---|
-| `SAFEPINCER_WORKSPACE` | Workspace directory | `./safepincer_workspace` |
-| `SAFEPINCER_LLM_MODE` | `local` or `cloud` | `local` |
-| `SAFEPINCER_API_BASE_URL` | LLM API endpoint | `http://localhost:11434/v1` |
-| `SAFEPINCER_API_KEY` | API key (cloud mode) | — |
-| `SAFEPINCER_MODEL` | Model identifier | `phi3:mini` |
-| `SAFEPINCER_MAX_STEPS` | Max loop iterations | `15` |
-| `SAFEPINCER_TOOL_TIMEOUT` | Tool timeout (seconds) | `5` |
+| `PINCER_WORKSPACE` | Workspace directory | `./pincer_workspace` |
+| `PINCER_LLM_MODE` | `local` or `cloud` | `local` |
+| `PINCER_API_BASE_URL` | LLM API endpoint | `http://localhost:11434/v1` |
+| `PINCER_API_KEY` | API key (cloud mode) | — |
+| `PINCER_MODEL` | Model identifier | `phi3:mini` |
+| `PINCER_MAX_STEPS` | Max loop iterations | `15` |
+| `PINCER_TOOL_TIMEOUT` | Tool timeout (seconds) | `5` |
 
 ## Available Tools
 
@@ -154,7 +154,7 @@ Options:
 
 ## Sandboxed Execution
 
-For maximum security, run SafePincer inside the bubblewrap sandbox:
+For maximum security, run Pincer inside the bubblewrap sandbox:
 
 ```bash
 # Install bubblewrap

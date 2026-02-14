@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# SafePincer Bubblewrap Sandbox Runner
+# Pincer Bubblewrap Sandbox Runner
 #
-# Runs SafePincer inside a bubblewrap (bwrap) sandbox with restricted access.
+# Runs Pincer inside a bubblewrap (bwrap) sandbox with restricted access.
 # This provides an additional layer of defense beyond the Confiner module.
 #
 # Security properties:
@@ -19,7 +19,7 @@
 #   sudo dnf install bubblewrap  # Fedora
 #
 # Usage:
-#   ./scripts/sandbox.sh [safepincer arguments...]
+#   ./scripts/sandbox.sh [pincer arguments...]
 #
 # Examples:
 #   ./scripts/sandbox.sh --model phi3:mini --task "What is 2+2?"
@@ -29,8 +29,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-BINARY="${PROJECT_DIR}/target/release/safepincer"
-DEFAULT_WORKSPACE="${PROJECT_DIR}/safepincer_workspace"
+BINARY="${PROJECT_DIR}/target/release/pincer"
+DEFAULT_WORKSPACE="${PROJECT_DIR}/pincer_workspace"
 
 # --- Check prerequisites ---
 if ! command -v bwrap &>/dev/null; then
@@ -68,7 +68,7 @@ done
 mkdir -p "$WORKSPACE"
 WORKSPACE="$(cd "$WORKSPACE" && pwd)"
 
-echo "🔒 SafePincer Sandbox"
+echo "🔒 Pincer Sandbox"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Binary:    $BINARY"
 echo "  Workspace: $WORKSPACE"
@@ -100,7 +100,7 @@ BWRAP_ARGS=(
 
     # Isolate UTS namespace (hostname)
     --unshare-uts
-    --hostname "safepincer-sandbox"
+    --hostname "pincer-sandbox"
 
     # Don't inherit supplementary groups
     --new-session
@@ -138,7 +138,7 @@ ulimit -u 100 2>/dev/null || true
 ulimit -c 0 2>/dev/null || true
 
 echo ""
-echo "🦞 Launching SafePincer in sandbox..."
+echo "🦞 Launching Pincer in sandbox..."
 echo ""
 
 # --- Execute in sandbox ---

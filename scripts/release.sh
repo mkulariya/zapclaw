@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# SafePincer Release Builder
+# Pincer Release Builder
 #
 # Builds optimized release binaries and creates a distributable tar.gz package.
 #
 # Usage: ./scripts/release.sh
-# Output: ./dist/safepincer-<version>-<target>.tar.gz
+# Output: ./dist/pincer-<version>-<target>.tar.gz
 
 set -euo pipefail
 
@@ -15,9 +15,9 @@ DIST_DIR="${PROJECT_DIR}/dist"
 # Get version from Cargo.toml
 VERSION=$(grep '^version' "${PROJECT_DIR}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
 TARGET=$(rustc -vV | grep host: | awk '{print $2}')
-PKG_NAME="safepincer-${VERSION}-${TARGET}"
+PKG_NAME="pincer-${VERSION}-${TARGET}"
 
-echo "🦞 SafePincer Release Builder"
+echo "🦞 Pincer Release Builder"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Version: ${VERSION}"
 echo "  Target:  ${TARGET}"
@@ -30,7 +30,7 @@ echo "🔨 Building release binary..."
 cd "$PROJECT_DIR"
 cargo build --release 2>&1
 
-BINARY="${PROJECT_DIR}/target/release/safepincer"
+BINARY="${PROJECT_DIR}/target/release/pincer"
 if [ ! -f "$BINARY" ]; then
     echo "❌ Release binary not found at: $BINARY"
     exit 1
@@ -77,5 +77,5 @@ echo "  Size:    ${PKG_SIZE}"
 echo ""
 echo "  Install:"
 echo "    tar xzf ${PKG_NAME}.tar.gz"
-echo "    sudo cp ${PKG_NAME}/safepincer /usr/local/bin/"
+echo "    sudo cp ${PKG_NAME}/pincer /usr/local/bin/"
 echo ""
