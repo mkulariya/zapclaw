@@ -65,6 +65,14 @@ struct Cli {
     #[arg(long)]
     no_confirm: bool,
 
+    /// Skip bubblewrap sandbox (development only — NOT recommended for production)
+    #[arg(long)]
+    no_sandbox: bool,
+
+    /// Disable network access inside sandbox (blocks Ollama + cloud APIs)
+    #[arg(long)]
+    sandbox_no_network: bool,
+
     /// Tool execution timeout in seconds
     #[arg(long, default_value = "30")]
     tool_timeout: u64,
@@ -193,6 +201,18 @@ async fn self_update() -> Result<()> {
     Ok(())
 }
 
+/// Resolve workspace path for sandbox bind mount (before full Config init).
+fn resolve_workspace_for_sandbox(workspace_arg: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(workspace_arg);
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(path)
+    }
+}
+
 /// Extract final response from reasoning format.
 /// If response contains <think>...</think> and <final>...</final>,
 /// only display the content inside <final>.
@@ -226,6 +246,19 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Sandbox enforcement — must happen FIRST, before any other initialization.
+    // If not already sandboxed and --no-sandbox is not set, re-exec inside bwrap.
+    let sandbox_state = if cli.no_sandbox {
+        pincer_core::sandbox::SandboxState::Disabled
+    } else {
+        // Resolve workspace path early for the sandbox bind mount
+        let ws_path = resolve_workspace_for_sandbox(&cli.workspace);
+        pincer_core::sandbox::ensure_sandboxed(&ws_path, cli.sandbox_no_network)?
+        // NOTE: If bwrap is available, ensure_sandboxed() does NOT return —
+        // it replaces this process via exec(). If we reach here, we're
+        // either already inside the sandbox (Active) or bwrap is missing (Unavailable).
+    };
 
     // Self-update mode
     if cli.update {
@@ -268,6 +301,11 @@ async fn main() -> Result<()> {
     println!("  Max steps:  {}", config.max_steps);
     println!("  Timeout:    {}s", config.tool_timeout_secs);
     println!("  Confirm:    {}", if config.require_confirmation { "yes" } else { "no" });
+    println!("  Sandbox:    {}", match sandbox_state {
+        pincer_core::sandbox::SandboxState::Active => "active (bubblewrap)",
+        pincer_core::sandbox::SandboxState::Disabled => "DISABLED (--no-sandbox)",
+        pincer_core::sandbox::SandboxState::Unavailable => "UNAVAILABLE (install bwrap)",
+    });
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // Initialize components
@@ -341,23 +379,25 @@ async fn main() -> Result<()> {
     println!("  Tools:      {}", tools.tool_names().join(", "));
     println!();
 
-    let agent = Agent::new(llm, memory.clone(), tools, config);
+    let sandbox_active = sandbox_state == pincer_core::sandbox::SandboxState::Active;
+    let agent = Agent::new(llm, memory.clone(), tools, config, sandbox_active);
 
     let session_store = SessionStore::new(&workspace);
     let mut session_id = uuid::Uuid::new_v4().to_string();
 
-    // Start cron background loop
-    let cron_workspace = workspace.clone();
-    let _cron_handle = tokio::spawn(async move {
-        cron_background_loop(&cron_workspace).await;
-    });
-
-    // Single task mode
+    // Single task mode — no cron loop needed
     if let Some(task) = cli.task {
         let response = run_with_streaming(&agent, &session_id, &task).await?;
         println!("\n{}", extract_final_response(&response));
         return Ok(());
     }
+
+    // Start cron background loop — only in REPL mode
+    let (cron_shutdown_tx, cron_shutdown_rx) = tokio::sync::watch::channel(false);
+    let cron_workspace = workspace.clone();
+    let cron_handle = tokio::spawn(async move {
+        cron_background_loop(&cron_workspace, cron_shutdown_rx).await;
+    });
 
     // Interactive REPL mode
     println!("Type your tasks below. Use 'exit' or Ctrl+C to quit.\n");
@@ -514,23 +554,42 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Graceful shutdown: stop cron background loop and wait for it to finish
+    let _ = cron_shutdown_tx.send(true);
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        cron_handle,
+    ).await;
+
     Ok(())
 }
 
 /// Cron background check loop — lightweight, runs every 30s.
-async fn cron_background_loop(workspace: &PathBuf) {
+///
+/// Uses `spawn_blocking` for file I/O to avoid blocking the async runtime.
+/// Listens for shutdown signal to terminate cleanly.
+async fn cron_background_loop(
+    workspace: &PathBuf,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                let ws = workspace.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    check_due_jobs(&ws)
+                }).await;
 
-        match check_due_jobs(workspace) {
-            Ok(due_jobs) => {
-                for job in &due_jobs {
-                    println!("\n🔔 Reminder: {}", job.description);
-                    println!("   {}\n", job.payload);
+                if let Ok(Ok(due_jobs)) = result {
+                    for job in &due_jobs {
+                        println!("\n🔔 Reminder: {}", job.description);
+                        println!("   {}\n", job.payload);
+                    }
                 }
             }
-            Err(_) => {
-                // Silently ignore cron errors in background loop
+            _ = shutdown.changed() => {
+                // Shutdown signal received — exit cleanly
+                break;
             }
         }
     }

@@ -248,6 +248,7 @@ pub struct Agent {
     runtime_info: RuntimeInfo,
     workspace_dir: PathBuf,
     session_store: Option<SessionStore>,
+    sandbox_active: bool,
 }
 
 impl Agent {
@@ -257,6 +258,7 @@ impl Agent {
         memory: Arc<MemoryDb>,
         tools: ToolRegistry,
         config: Config,
+        sandbox_active: bool,
     ) -> Self {
         let workspace_dir = config.workspace_path.clone();
         let session_store = Some(SessionStore::new(&workspace_dir));
@@ -271,6 +273,7 @@ impl Agent {
             runtime_info,
             config,
             session_store,
+            sandbox_active,
         }
     }
 
@@ -838,11 +841,16 @@ impl Agent {
         sections.push("Use `find` and `grep` to discover files. Use `read` to view files, `edit` for precise changes, `write` for new files.".to_string());
         sections.push(String::new());
 
-        // Sandbox info
+        // Sandbox info — conditional on actual sandbox state
         sections.push("## Sandbox".to_string());
-        sections.push("You are running in a sandboxed runtime (bubblewrap namespace isolation).".to_string());
-        sections.push("All file operations are confined to the workspace. Symlinks that escape the workspace are blocked.".to_string());
-        sections.push("Network access is controlled by outbound tunnel policy. Dangerous commands are blocked by the exec tool.".to_string());
+        if self.sandbox_active {
+            sections.push("You are running in a sandboxed runtime (bubblewrap namespace isolation).".to_string());
+            sections.push("All file operations are confined to the workspace. Symlinks that escape the workspace are blocked.".to_string());
+            sections.push("Network access is controlled by outbound tunnel policy. Dangerous commands are blocked by the exec tool.".to_string());
+        } else {
+            sections.push("WARNING: Running outside sandbox. File confinement is enforced by the Confiner module only.".to_string());
+            sections.push("For full security, install bubblewrap and run without --no-sandbox.".to_string());
+        }
         sections.push(String::new());
 
         // Model Aliases

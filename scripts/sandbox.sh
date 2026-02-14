@@ -1,31 +1,23 @@
 #!/usr/bin/env bash
-# Pincer Bubblewrap Sandbox Runner
+# DEPRECATED: Pincer now auto-sandboxes itself.
 #
+# The pincer binary automatically re-execs inside bubblewrap on startup.
+# You no longer need this script — just run: pincer [args]
+#
+# Use --no-sandbox to disable sandbox (development only).
+# Use --sandbox-no-network to disable network inside sandbox.
+#
+# This script is kept for backwards compatibility and forwards to the binary.
+#
+# Original description:
 # Runs Pincer inside a bubblewrap (bwrap) sandbox with restricted access.
-# This provides an additional layer of defense beyond the Confiner module.
-#
-# Security properties:
-# - Read-only root filesystem
-# - No network access (unless --enable-outbound)
-# - Isolated /tmp
-# - No access to host /home except workspace
-# - No device access
-# - New PID namespace (can't signal host processes)
-# - No setuid/setgid
-# - Resource limits (memory, CPU, file descriptors)
-#
-# Prerequisites:
-#   sudo apt install bubblewrap  # Debian/Ubuntu
-#   sudo dnf install bubblewrap  # Fedora
-#
-# Usage:
-#   ./scripts/sandbox.sh [pincer arguments...]
-#
-# Examples:
-#   ./scripts/sandbox.sh --model phi3:mini --task "What is 2+2?"
-#   ./scripts/sandbox.sh --workspace /tmp/safe_ws
 
 set -euo pipefail
+
+echo "NOTE: sandbox.sh is deprecated. Pincer now auto-sandboxes."
+echo "  Just run: pincer [args]"
+echo "  Use --no-sandbox to disable (dev only)."
+echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"

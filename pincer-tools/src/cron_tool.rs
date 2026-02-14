@@ -74,9 +74,7 @@ impl CronTool {
     }
 
     fn save_state(&self, state: &CronState) -> Result<()> {
-        let content = serde_json::to_string_pretty(state)?;
-        std::fs::write(self.cron_path(), content)?;
-        Ok(())
+        atomic_write_json(&self.cron_path(), state)
     }
 
     /// Parse relative time strings like "in 5m", "in 1h", "in 30s"
@@ -250,8 +248,21 @@ impl Tool for CronTool {
     }
 }
 
+/// Atomically write JSON to a file (write tmp + rename to prevent partial reads).
+fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
+    let tmp_path = path.with_extension("json.tmp");
+    let content = serde_json::to_string_pretty(data)?;
+    std::fs::write(&tmp_path, &content)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
 /// Check for due cron jobs and return their payloads.
 /// Called from the background loop in the CLI.
+///
+/// Also performs housekeeping:
+/// - Removes triggered non-recurring jobs older than 24 hours
+/// - Skips recurring jobs to next future occurrence (prevents catch-up flood)
 pub fn check_due_jobs(workspace: &Path) -> Result<Vec<CronJob>> {
     let cron_path = workspace.join("cron.json");
     if !cron_path.exists() {
@@ -262,6 +273,7 @@ pub fn check_due_jobs(workspace: &Path) -> Result<Vec<CronJob>> {
     let mut state: CronState = serde_json::from_str(&content)?;
     let now = chrono::Utc::now();
     let mut due = Vec::new();
+    let mut state_changed = false;
 
     for job in &mut state.jobs {
         if job.triggered && !job.recurring {
@@ -271,9 +283,16 @@ pub fn check_due_jobs(workspace: &Path) -> Result<Vec<CronJob>> {
         if let Ok(fire_time) = chrono::DateTime::parse_from_rfc3339(&job.fire_at) {
             if now >= fire_time {
                 due.push(job.clone());
+                state_changed = true;
+
                 if job.recurring {
                     if let Some(interval) = job.interval_secs {
-                        let next = fire_time + chrono::Duration::seconds(interval as i64);
+                        let interval_dur = chrono::Duration::seconds(interval as i64);
+                        // Skip forward to next future occurrence (prevents catch-up flood)
+                        let mut next = fire_time + interval_dur;
+                        while next <= now {
+                            next += interval_dur;
+                        }
                         job.fire_at = next.to_rfc3339();
                     }
                 } else {
@@ -283,10 +302,25 @@ pub fn check_due_jobs(workspace: &Path) -> Result<Vec<CronJob>> {
         }
     }
 
-    // Save updated state
-    if !due.is_empty() {
-        let content = serde_json::to_string_pretty(&state)?;
-        std::fs::write(&cron_path, content)?;
+    // Stale cleanup: remove triggered non-recurring jobs older than 24 hours
+    let cutoff = now - chrono::Duration::hours(24);
+    let before_len = state.jobs.len();
+    state.jobs.retain(|j| {
+        if j.triggered && !j.recurring {
+            chrono::DateTime::parse_from_rfc3339(&j.fire_at)
+                .map(|t| t > cutoff)
+                .unwrap_or(true)
+        } else {
+            true
+        }
+    });
+    if state.jobs.len() != before_len {
+        state_changed = true;
+    }
+
+    // Save updated state atomically
+    if state_changed {
+        atomic_write_json(&cron_path, &state)?;
     }
 
     Ok(due)
@@ -322,5 +356,124 @@ mod tests {
         let tmp = std::env::temp_dir();
         let tool = CronTool::new(&tmp);
         assert_eq!(tool.name(), "cron");
+    }
+
+    #[test]
+    fn test_check_due_jobs_triggers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let state = CronState {
+            jobs: vec![CronJob {
+                id: "test_1".to_string(),
+                description: "Past job".to_string(),
+                fire_at: past,
+                payload: "Hello!".to_string(),
+                recurring: false,
+                interval_secs: None,
+                triggered: false,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }],
+        };
+        let cron_path = tmp.path().join("cron.json");
+        std::fs::write(&cron_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        let due = check_due_jobs(tmp.path()).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "test_1");
+
+        // Job should now be marked triggered
+        let content = std::fs::read_to_string(&cron_path).unwrap();
+        let updated: CronState = serde_json::from_str(&content).unwrap();
+        assert!(updated.jobs[0].triggered);
+    }
+
+    #[test]
+    fn test_check_due_jobs_recurring_catchup() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Fire time was 2 hours ago, interval is 60 seconds
+        let past = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        let state = CronState {
+            jobs: vec![CronJob {
+                id: "recurring_1".to_string(),
+                description: "Recurring job".to_string(),
+                fire_at: past,
+                payload: "Tick!".to_string(),
+                recurring: true,
+                interval_secs: Some(60),
+                triggered: false,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }],
+        };
+        let cron_path = tmp.path().join("cron.json");
+        std::fs::write(&cron_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        // Should fire once, NOT 120 times
+        let due = check_due_jobs(tmp.path()).unwrap();
+        assert_eq!(due.len(), 1);
+
+        // Next fire_at should be in the FUTURE (not just +60s from 2h ago)
+        let content = std::fs::read_to_string(&cron_path).unwrap();
+        let updated: CronState = serde_json::from_str(&content).unwrap();
+        let next_fire = chrono::DateTime::parse_from_rfc3339(&updated.jobs[0].fire_at).unwrap();
+        assert!(next_fire > chrono::Utc::now(), "Next fire should be in the future");
+    }
+
+    #[test]
+    fn test_stale_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A triggered job from 48 hours ago — should be cleaned up
+        let old_time = (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        let state = CronState {
+            jobs: vec![CronJob {
+                id: "stale_1".to_string(),
+                description: "Old triggered job".to_string(),
+                fire_at: old_time,
+                payload: "Old".to_string(),
+                recurring: false,
+                interval_secs: None,
+                triggered: true,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }],
+        };
+        let cron_path = tmp.path().join("cron.json");
+        std::fs::write(&cron_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        let due = check_due_jobs(tmp.path()).unwrap();
+        assert!(due.is_empty(), "Already triggered job should not fire again");
+
+        // Stale job should be removed
+        let content = std::fs::read_to_string(&cron_path).unwrap();
+        let updated: CronState = serde_json::from_str(&content).unwrap();
+        assert!(updated.jobs.is_empty(), "Stale triggered job should be cleaned up");
+    }
+
+    #[test]
+    fn test_atomic_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cron_path = tmp.path().join("cron.json");
+        let state = CronState {
+            jobs: vec![CronJob {
+                id: "atomic_1".to_string(),
+                description: "Test".to_string(),
+                fire_at: chrono::Utc::now().to_rfc3339(),
+                payload: "Test".to_string(),
+                recurring: false,
+                interval_secs: None,
+                triggered: false,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }],
+        };
+
+        // Write atomically
+        atomic_write_json(&cron_path, &state).unwrap();
+
+        // Verify the file is valid JSON
+        let content = std::fs::read_to_string(&cron_path).unwrap();
+        let loaded: CronState = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded.jobs.len(), 1);
+        assert_eq!(loaded.jobs[0].id, "atomic_1");
+
+        // Temp file should not exist
+        assert!(!cron_path.with_extension("json.tmp").exists());
     }
 }

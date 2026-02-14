@@ -44,6 +44,24 @@ impl ProcessTool {
             processes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
+
+    /// Reap finished processes from the registry.
+    /// Prevents dead child processes from accumulating in memory.
+    async fn reap_finished(&self) {
+        let mut procs = self.processes.lock().await;
+        let mut finished = Vec::new();
+        for (id, entry) in procs.iter_mut() {
+            if let Ok(Some(_)) = entry.child.try_wait() {
+                finished.push(id.clone());
+            }
+        }
+        for id in &finished {
+            procs.remove(id);
+        }
+        if !finished.is_empty() {
+            log::debug!("Reaped {} finished processes", finished.len());
+        }
+    }
 }
 
 #[async_trait]
@@ -95,6 +113,9 @@ impl Tool for ProcessTool {
     async fn execute(&self, args_json: &str) -> Result<String> {
         let args: ProcessArgs = serde_json::from_str(args_json)
             .context("Invalid process arguments")?;
+
+        // Reap finished processes before any action
+        self.reap_finished().await;
 
         match args.action.as_str() {
             "start" => {
@@ -237,5 +258,40 @@ mod tests {
         let tool = ProcessTool::new(confiner);
         assert_eq!(tool.name(), "process");
         assert!(tool.requires_confirmation());
+    }
+
+    #[tokio::test]
+    async fn test_reap_finished() {
+        let confiner = Confiner::new(std::env::temp_dir().as_path()).unwrap();
+        let tool = ProcessTool::new(confiner);
+
+        // Start a process that exits immediately
+        let child = tokio::process::Command::new("true")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        {
+            let mut procs = tool.processes.lock().await;
+            procs.insert("test_proc".to_string(), ProcessEntry {
+                id: "test_proc".to_string(),
+                command: "true".to_string(),
+                child,
+                started_at: "now".to_string(),
+                _output_buffer: Vec::new(),
+            });
+            assert_eq!(procs.len(), 1);
+        }
+
+        // Wait briefly for the process to finish
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Reap should remove the finished process
+        tool.reap_finished().await;
+
+        let procs = tool.processes.lock().await;
+        assert!(procs.is_empty(), "Finished process should be reaped");
     }
 }

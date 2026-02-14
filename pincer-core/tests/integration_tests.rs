@@ -124,7 +124,7 @@ fn make_agent(responses: Vec<LlmResponse>) -> Agent {
         tool_timeout_secs: 5,
         ..Config::default()
     };
-    Agent::new(llm, memory, tools, config)
+    Agent::new(llm, memory, tools, config, false)
 }
 
 #[tokio::test]
@@ -322,7 +322,7 @@ async fn test_context_overflow_recovery() {
         context_window_tokens: 4096,
         ..Config::default()
     };
-    let agent = Agent::new(llm, memory, tools, config);
+    let agent = Agent::new(llm, memory, tools, config, false);
 
     // Should recover from the overflow and succeed
     let result = agent.run("overflow-test", "Hello").await.unwrap();

@@ -27,43 +27,59 @@ Pincer fixes all of these while staying lightweight and fast.
 | Default network exposure | **None** (localhost only) | `0.0.0.0:18789` |
 | Prompt injection guard | ✅ Multi-layer | ❌ None |
 | Workspace confinement | ✅ Symlink-safe | ❌ Partial |
-| Sandbox support | ✅ Bubblewrap | ❌ None |
+| Sandbox | ✅ Bubblewrap (mandatory) | ❌ None |
 | LLM support | Ollama (local) + Cloud | Cloud only |
 | Dependencies | ~25 crates | 60+ npm packages |
 
 ## Quick Start
 
-### Prerequisites
-
-- **Rust** 1.70+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-- **Ollama** (for local LLM): `curl -fsSL https://ollama.com/install.sh | sh`
-
-### Install & Run
+### Install
 
 ```bash
-# Clone
-git clone https://github.com/your-org/pincer.git
-cd pincer
+# 1. Install Rust (one-time, skip if you already have it)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Build
-cargo build --release
+# 2. Install bubblewrap (required — Pincer runs inside a sandbox)
+sudo apt install bubblewrap        # Debian/Ubuntu
+# sudo dnf install bubblewrap      # Fedora
+# sudo pacman -S bubblewrap        # Arch
+# brew install bubblewrap           # macOS
 
-# Pull a model (one-time)
+# 3. Install Ollama (one-time, only required for local LLM inference)
+curl -fsSL https://ollama.com/install.sh | sh
 ollama pull phi3:mini
 
-# Run interactive REPL
-./target/release/pincer
-
-# Or run a single task
-./target/release/pincer --task "What is sqrt(144) + 3^2?"
+# 4. Install Pincer
+cargo install --git https://github.com/your-org/pincer.git pincer-cli
 ```
 
-### Cloud LLM Mode
+That's it. Now `pincer` is available as a command from anywhere. It automatically runs inside a bubblewrap sandbox for security.
+
+### Run
 
 ```bash
-export PINCER_API_KEY="sk-your-key"
-./target/release/pincer --model-mode cloud --model-name gpt-4o
+# Interactive REPL
+pincer
+
+# Single task
+pincer --task "What is sqrt(144) + 3^2?"
+
+# Cloud LLM mode (no Ollama needed)
+PINCER_API_KEY="sk-your-key" pincer --model-mode cloud --model-name gpt-4o
 ```
+
+### REPL Commands
+
+| Command | Description |
+|---|---|
+| `/status` | Show session info (memory files, tokens, session ID) |
+| `/compact [N]` | Compact memory, keep last N days (default: 7) |
+| `/resume` | List recent sessions |
+| `/resume <id>` | Resume a previous session |
+| `/update` | Self-update from git |
+| `help` | Show help |
+| `tools` | List available tools |
+| `exit` | Quit |
 
 ## Architecture
 
@@ -75,6 +91,7 @@ pincer/
 │   ├── memory.rs          # SQLite session memory (4K token limit)
 │   ├── sanitizer.rs       # Prompt injection guard
 │   ├── confiner.rs        # Workspace path confinement
+│   ├── sandbox.rs         # Bubblewrap sandbox enforcement
 │   └── config.rs          # Env-var based configuration
 ├── pincer-tools/      # Safe tool implementations
 │   ├── math_tool.rs       # Pure Rust math evaluator
@@ -86,7 +103,7 @@ pincer/
 │   ├── outbound.rs        # HTTPS proxy (mTLS, rate limiting)
 │   └── inbound.rs         # JSON-RPC 2.0 server
 └── scripts/
-    ├── sandbox.sh         # Bubblewrap sandbox runner
+    ├── sandbox.sh         # Deprecated — sandbox is now built-in
     └── gen_certs.sh       # mTLS certificate generator
 ```
 
@@ -101,7 +118,7 @@ pincer/
 5. **Rate Limiting** — Sliding-window limiter on outbound requests
 6. **Domain Allowlisting** — Only approved domains reachable via outbound tunnel
 7. **mTLS Authentication** — Mutual TLS for cloud API connections
-8. **Sandbox** — Optional bubblewrap isolation (read-only root FS, PID namespace, capability drop)
+8. **Sandbox** — Mandatory bubblewrap isolation (read-only root FS, PID namespace, capability drop)
 9. **Human Confirmation** — Required for sensitive tool calls
 10. **Max Steps Guard** — Agent loop capped at 15 iterations
 
@@ -128,6 +145,8 @@ Options:
       --max-steps <N>        Max agent steps per task [default: 15]
   -t, --task <TASK>          Run single task and exit
       --no-confirm           Disable confirmation prompts
+      --no-sandbox           Skip bubblewrap sandbox (dev only)
+      --sandbox-no-network   Disable network inside sandbox
   -h, --help                 Print help
   -V, --version              Print version
 ```
@@ -143,6 +162,7 @@ Options:
 | `PINCER_MODEL` | Model identifier | `phi3:mini` |
 | `PINCER_MAX_STEPS` | Max loop iterations | `15` |
 | `PINCER_TOOL_TIMEOUT` | Tool timeout (seconds) | `5` |
+| `PINCER_SANDBOXED` | Set to `1` when running inside sandbox (auto-set) | — |
 
 ## Available Tools
 
@@ -152,20 +172,32 @@ Options:
 | `file_ops` | Read/write/append/list files in workspace | No |
 | `browse_url` | Fetch and read web page content (read-only) | Yes |
 
-## Sandboxed Execution
+## Sandbox
 
-For maximum security, run Pincer inside the bubblewrap sandbox:
+Pincer **always** runs inside a bubblewrap (bwrap) sandbox by default. The binary self-wraps: on startup, if not already sandboxed, it re-execs itself inside bwrap with full namespace isolation.
+
+**Sandbox properties:**
+- Read-only root filesystem
+- Isolated PID, IPC, UTS namespaces
+- All capabilities dropped
+- Only the workspace directory is writable
+- Isolated /tmp
+- Process dies with parent
+
+Network is enabled by default (needed for Ollama on localhost and cloud APIs). Use `--sandbox-no-network` to disable.
 
 ```bash
-# Install bubblewrap
-sudo apt install bubblewrap
+# Normal usage — sandbox is automatic
+pincer --task "Calculate pi * e"
 
-# Run in sandbox (no network)
-./scripts/sandbox.sh --task "Calculate pi * e"
+# Disable network inside sandbox
+pincer --sandbox-no-network --task "What is 2+2?"
 
-# Run in sandbox with network (for cloud LLM)
-./scripts/sandbox.sh --enable-outbound --model-mode cloud
+# Skip sandbox (development only — NOT recommended)
+pincer --no-sandbox
 ```
+
+If bubblewrap is not installed, Pincer prints a warning and runs without sandbox (degraded security).
 
 ## Testing
 
