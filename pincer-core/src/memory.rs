@@ -54,6 +54,22 @@ pub struct MemorySearchResult {
     pub score: f32,
     pub citation: Option<String>,
     pub source: String,
+    /// Embedding provider name (e.g., "openai-compat"), None if keyword-only
+    pub provider: Option<String>,
+    /// Embedding model used, None if keyword-only
+    pub model: Option<String>,
+    /// True if result came from keyword search only (no vector embeddings)
+    pub fallback: bool,
+}
+
+/// Progress callback for sync pipeline.
+pub type SyncProgressFn = Box<dyn Fn(usize, usize, &str) + Send + Sync>;
+
+/// Compaction metadata tracked in SQLite meta table.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CompactionMeta {
+    pub compaction_count: usize,
+    pub last_compact_at: Option<String>,
 }
 
 /// Internal chunk produced by markdown chunking.
@@ -87,6 +103,12 @@ struct IndexMeta {
 pub struct CompactionResult {
     pub files_compacted: usize,
     pub chars_freed: usize,
+    /// LLM-generated summary (only set when compact_llm was used)
+    pub summary: Option<String>,
+    /// Token count before compaction
+    pub tokens_before: Option<usize>,
+    /// Token count after compaction
+    pub tokens_after: Option<usize>,
 }
 
 // ── Schema ──────────────────────────────────────────────────────────────
@@ -428,7 +450,10 @@ impl MemoryDb {
 
     // ── File Listing (matching OpenClaw's listMemoryFiles) ─────────────
 
-    /// List all memory files: MEMORY.md + memory/*.md
+    /// Workspace directories scanned for .md files (besides MEMORY.md + memory/).
+    const EXTRA_DIRS: &'static [&'static str] = &["docs", "notes"];
+
+    /// List all memory files: MEMORY.md + memory/*.md + docs/*.md + notes/*.md
     pub fn list_memory_files(&self) -> Result<Vec<(String, String)>> {
         let mut files = Vec::new();
 
@@ -437,17 +462,24 @@ impl MemoryDb {
             files.push(("MEMORY.md".to_string(), std::fs::read_to_string(&memory_md)?));
         }
 
-        let memory_dir = self.memory_dir();
-        if memory_dir.exists() {
-            let mut dir_entries: Vec<_> = std::fs::read_dir(&memory_dir)?
+        // Scan memory/, docs/, notes/ for .md files
+        let dirs: Vec<(&str, PathBuf)> = std::iter::once(("memory", self.memory_dir()))
+            .chain(Self::EXTRA_DIRS.iter().map(|d| (*d, self.workspace.join(d))))
+            .collect();
+
+        for (prefix, dir) in dirs {
+            if !dir.exists() {
+                continue;
+            }
+            let mut dir_entries: Vec<_> = std::fs::read_dir(&dir)?
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-                .filter(|e| !e.path().is_symlink()) // skip symlinks like OpenClaw
+                .filter(|e| !e.path().is_symlink()) // skip symlinks — workspace confinement
                 .collect();
             dir_entries.sort_by_key(|e| e.file_name());
 
             for entry in dir_entries {
-                let path = format!("memory/{}", entry.file_name().to_string_lossy());
+                let path = format!("{}/{}", prefix, entry.file_name().to_string_lossy());
                 let content = std::fs::read_to_string(entry.path())?;
                 files.push((path, content));
             }
@@ -480,8 +512,19 @@ impl MemoryDb {
 
     // ── Sync Pipeline (matching OpenClaw's syncMemoryFiles) ────────────
 
+    /// Determine the source tag for a file path.
+    /// "memory" for MEMORY.md and memory/*.md, "custom" for docs/*.md and notes/*.md.
+    fn source_for_path(rel_path: &str) -> &'static str {
+        if rel_path == "MEMORY.md" || rel_path.starts_with("memory/") {
+            "memory"
+        } else {
+            "custom"
+        }
+    }
+
     /// Sync memory files into SQLite index.
     /// Hash-based skip for unchanged files (exact OpenClaw behavior).
+    /// Indexes: MEMORY.md, memory/*.md (source=memory), docs/*.md, notes/*.md (source=custom).
     pub fn sync(&self, model: &str) -> Result<usize> {
         let memory_files = self.list_memory_files()?;
         let mut indexed = 0usize;
@@ -494,6 +537,7 @@ impl MemoryDb {
             } else {
                 self.workspace.join(rel_path)
             };
+            let source = Self::source_for_path(rel_path);
             let entry = self.build_file_entry(rel_path, &abs_path)?;
 
             // Check if file unchanged (hash match) — skip if so
@@ -501,7 +545,7 @@ impl MemoryDb {
                 .prepare("SELECT hash FROM files WHERE path = ? AND source = ?")
                 .ok()
                 .and_then(|mut s| {
-                    s.query_row(params![rel_path, "memory"], |r| r.get(0)).ok()
+                    s.query_row(params![rel_path, source], |r| r.get(0)).ok()
                 });
 
             if existing_hash.as_deref() == Some(&entry.hash) {
@@ -509,21 +553,23 @@ impl MemoryDb {
             }
 
             // Index this file
-            self.index_file(&entry, content, model, "memory")?;
+            self.index_file(&entry, content, model, source)?;
             indexed += 1;
         }
 
-        // Clean up stale entries (files that no longer exist)
-        let stale_paths: Vec<String> = {
-            let db = self.db.lock().unwrap();
-            let mut stmt = db.prepare("SELECT path FROM files WHERE source = ?")?;
-            let rows = stmt.query_map(params!["memory"], |r| r.get::<_, String>(0))?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
+        // Clean up stale entries for both sources
+        for source in &["memory", "custom"] {
+            let stale_paths: Vec<String> = {
+                let db = self.db.lock().unwrap();
+                let mut stmt = db.prepare("SELECT path FROM files WHERE source = ?")?;
+                let rows = stmt.query_map(params![source], |r| r.get::<_, String>(0))?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
 
-        for stale_path in &stale_paths {
-            if !active_paths.contains(stale_path) {
-                self.remove_file_index(stale_path, "memory")?;
+            for stale_path in &stale_paths {
+                if !active_paths.contains(stale_path) {
+                    self.remove_file_index(stale_path, source)?;
+                }
             }
         }
 
@@ -857,6 +903,9 @@ impl MemoryDb {
                 score,
                 citation: Some(citation),
                 source,
+                provider: None,
+                model: None,
+                fallback: true,
             })
         })?;
 
@@ -916,6 +965,9 @@ impl MemoryDb {
                     score,
                     citation: Some(citation),
                     source,
+                    provider: None,
+                    model: None,
+                    fallback: true,
                 });
             }
         }
@@ -1001,6 +1053,9 @@ impl MemoryDb {
                 score,
                 citation: Some(citation),
                 source,
+                provider: None,
+                model: Some(self.embedding_model.clone()),
+                fallback: false,
             });
         }
 
@@ -1234,7 +1289,7 @@ impl MemoryDb {
     pub fn compact(&self, keep_days: usize) -> Result<CompactionResult> {
         let memory_dir = self.memory_dir();
         if !memory_dir.exists() {
-            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0 });
+            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0, summary: None, tokens_before: None, tokens_after: None });
         }
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -1265,7 +1320,7 @@ impl MemoryDb {
         }
 
         if files_to_compact.is_empty() {
-            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0 });
+            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0, summary: None, tokens_before: None, tokens_after: None });
         }
 
         let mut summary_lines = Vec::new();
@@ -1307,7 +1362,254 @@ impl MemoryDb {
         // Re-sync index after compaction
         log::info!("Compacted {} memory files, freed ~{} chars", count, total_freed);
 
-        Ok(CompactionResult { files_compacted: count, chars_freed: total_freed })
+        Ok(CompactionResult { files_compacted: count, chars_freed: total_freed, summary: None, tokens_before: None, tokens_after: None })
+    }
+
+    // ── Sync With Options (matching OpenClaw's syncMemoryFiles params) ──
+
+    /// Sync with advanced options: force reindex, progress callback.
+    /// Matches OpenClaw's syncMemoryFiles with needsFullReindex + progress.
+    pub fn sync_with_options(
+        &self,
+        model: &str,
+        force_reindex: bool,
+        progress: Option<&SyncProgressFn>,
+    ) -> Result<usize> {
+        let memory_files = self.list_memory_files()?;
+        let total = memory_files.len();
+        let mut indexed = 0usize;
+        let mut completed = 0usize;
+        let active_paths: std::collections::HashSet<String> =
+            memory_files.iter().map(|(p, _)| p.clone()).collect();
+
+        // Parallel file reading + chunking (matching OpenClaw's concurrency pattern)
+        // Collect file entries in parallel using std::thread::scope
+        let file_entries: Vec<(String, String, MemoryFileEntry)> = std::thread::scope(|s| {
+            let handles: Vec<_> = memory_files.iter().map(|(rel_path, content)| {
+                let rel = rel_path.clone();
+                let cont = content.clone();
+                let ws = self.workspace.clone();
+                s.spawn(move || {
+                    let abs_path = if rel == "MEMORY.md" {
+                        ws.join("MEMORY.md")
+                    } else {
+                        ws.join(&rel)
+                    };
+                    let meta = std::fs::metadata(&abs_path).ok()?;
+                    let hash = hash_text(&cont);
+                    let mtime_ms = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let entry = MemoryFileEntry {
+                        path: rel.clone(),
+                        abs_path,
+                        hash,
+                        mtime_ms,
+                        size: meta.len() as i64,
+                    };
+                    Some((rel, cont, entry))
+                })
+            }).collect();
+            handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+        });
+
+        // Sequential DB writes (matching OpenClaw: parallel read, sequential write)
+        for (rel_path, content, entry) in &file_entries {
+            let source = Self::source_for_path(rel_path);
+
+            // Check if file unchanged (hash match) — skip unless force_reindex
+            if !force_reindex {
+                let existing_hash: Option<String> = self.db.lock().unwrap()
+                    .prepare("SELECT hash FROM files WHERE path = ? AND source = ?")
+                    .ok()
+                    .and_then(|mut s| {
+                        s.query_row(params![rel_path, source], |r| r.get(0)).ok()
+                    });
+
+                if existing_hash.as_deref() == Some(&entry.hash) {
+                    completed += 1;
+                    if let Some(progress_fn) = progress {
+                        progress_fn(completed, total, rel_path);
+                    }
+                    continue; // unchanged
+                }
+            }
+
+            // Index this file
+            self.index_file(entry, content, model, source)?;
+            indexed += 1;
+            completed += 1;
+            if let Some(progress_fn) = progress {
+                progress_fn(completed, total, rel_path);
+            }
+        }
+
+        // Clean up stale entries for both sources
+        for source in &["memory", "custom"] {
+            let stale_paths: Vec<String> = {
+                let db = self.db.lock().unwrap();
+                let mut stmt = db.prepare("SELECT path FROM files WHERE source = ?")?;
+                let rows = stmt.query_map(params![source], |r| r.get::<_, String>(0))?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
+
+            for stale_path in &stale_paths {
+                if !active_paths.contains(stale_path) {
+                    self.remove_file_index(stale_path, source)?;
+                }
+            }
+        }
+
+        Ok(indexed)
+    }
+
+    // ── Compaction Metadata (matching OpenClaw's session tracking) ─────
+
+    /// Read compaction metadata from SQLite meta table.
+    pub fn compaction_meta(&self) -> Result<CompactionMeta> {
+        let db = self.db.lock().unwrap();
+        let json: Option<String> = db
+            .prepare("SELECT value FROM meta WHERE key = 'compaction_meta'")
+            .ok()
+            .and_then(|mut s| s.query_row([], |r| r.get(0)).ok());
+        match json {
+            Some(j) => Ok(serde_json::from_str(&j).unwrap_or_default()),
+            None => Ok(CompactionMeta::default()),
+        }
+    }
+
+    /// Update compaction metadata.
+    pub fn update_compaction_meta(&self, meta: &CompactionMeta) -> Result<()> {
+        let json = serde_json::to_string(meta)?;
+        self.db.lock().unwrap().execute(
+            "INSERT INTO meta (key, value) VALUES ('compaction_meta', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![json],
+        )?;
+        Ok(())
+    }
+
+    // ── LLM-Driven Compaction (matching OpenClaw's compact) ───────────
+
+    /// LLM-driven compaction: summarize old memory files using the LLM.
+    /// Matches OpenClaw's compact() with LLM summarization.
+    /// Falls back to rule-based compact() if LLM fails.
+    pub async fn compact_llm(
+        &self,
+        llm: &dyn crate::llm::LlmClient,
+        keep_days: usize,
+    ) -> Result<CompactionResult> {
+        let memory_dir = self.memory_dir();
+        if !memory_dir.exists() {
+            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0, summary: None, tokens_before: None, tokens_after: None });
+        }
+
+        let tokens_before = self.total_memory_tokens()?;
+
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let cutoff = Utc::now()
+            .checked_sub_signed(chrono::Duration::days(keep_days as i64))
+            .unwrap_or_else(Utc::now)
+            .format("%Y-%m-%d")
+            .to_string();
+
+        let mut files_to_compact = Vec::new();
+        let mut total_freed = 0usize;
+
+        let mut dir_entries: Vec<_> = std::fs::read_dir(&memory_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+            .collect();
+        dir_entries.sort_by_key(|e| e.file_name());
+
+        for entry in &dir_entries {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let date_str = name.trim_end_matches(".md");
+            if date_str >= cutoff.as_str() || date_str == today {
+                continue;
+            }
+            let content = std::fs::read_to_string(entry.path())?;
+            total_freed += content.len();
+            files_to_compact.push((name, content));
+        }
+
+        if files_to_compact.is_empty() {
+            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0, summary: None, tokens_before: Some(tokens_before), tokens_after: Some(tokens_before) });
+        }
+
+        // Combine old content for LLM summarization
+        let combined: String = files_to_compact
+            .iter()
+            .map(|(name, content)| format!("### {}\n{}", name, content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // Ask LLM to summarize
+        let prompt = format!(
+            "Summarize the following conversation history into concise, durable facts. \
+             Focus on user preferences, decisions made, key findings, and important context. \
+             Format as a bulleted list. Be concise but preserve all important details.\n\n{}",
+            combined
+        );
+
+        let messages = vec![crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+
+        let summary = match llm.complete(&messages, &[]).await {
+            Ok(resp) => resp.content.unwrap_or_default(),
+            Err(e) => {
+                log::warn!("LLM compaction failed, falling back to rule-based: {}", e);
+                return self.compact(keep_days);
+            }
+        };
+
+        // Write LLM summary to MEMORY.md
+        let memory_md = self.memory_md_path();
+        let existing = if memory_md.exists() {
+            std::fs::read_to_string(&memory_md)?
+        } else {
+            "# Memory\n".to_string()
+        };
+        let compacted_section = format!(
+            "\n## Compacted Summary ({})\n\n{}\n",
+            Utc::now().format("%Y-%m-%d %H:%M UTC"),
+            summary
+        );
+        std::fs::write(&memory_md, format!("{}\n{}", existing, compacted_section))?;
+
+        // Delete old files
+        let count = files_to_compact.len();
+        for (name, _) in &files_to_compact {
+            let path = memory_dir.join(name);
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+            }
+        }
+
+        // Update compaction metadata
+        let mut meta = self.compaction_meta()?;
+        meta.compaction_count += 1;
+        meta.last_compact_at = Some(Utc::now().to_rfc3339());
+        self.update_compaction_meta(&meta)?;
+
+        let tokens_after = self.total_memory_tokens()?;
+
+        log::info!("LLM-compacted {} memory files, freed ~{} chars, tokens {}->{}", count, total_freed, tokens_before, tokens_after);
+
+        Ok(CompactionResult {
+            files_compacted: count,
+            chars_freed: total_freed,
+            summary: Some(summary),
+            tokens_before: Some(tokens_before),
+            tokens_after: Some(tokens_after),
+        })
     }
 
     // ── Audit Log ───────────────────────────────────────────────────────

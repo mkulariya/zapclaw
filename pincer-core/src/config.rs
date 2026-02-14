@@ -35,6 +35,9 @@ pub struct Config {
 
     /// Whether to require human confirmation for all tool calls
     pub require_confirmation: bool,
+
+    /// Context window size in tokens (used for truncation calculations)
+    pub context_window_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -57,6 +60,7 @@ impl Default for Config {
             enable_inbound: false,
             tool_timeout_secs: 5,
             require_confirmation: true,
+            context_window_tokens: 128_000,
         }
     }
 }
@@ -111,6 +115,12 @@ impl Config {
 
         if let Ok(confirm) = std::env::var("PINCER_REQUIRE_CONFIRMATION") {
             config.require_confirmation = confirm.to_lowercase() != "false";
+        }
+
+        if let Ok(ctx) = std::env::var("PINCER_CONTEXT_WINDOW") {
+            if let Ok(n) = ctx.parse::<usize>() {
+                config.context_window_tokens = n;
+            }
         }
 
         config

@@ -9,8 +9,10 @@ use pincer_core::memory::MemoryDb;
 /// Memory search tool — semantically search MEMORY.md + memory/*.md.
 ///
 /// OpenClaw parity: mandatory recall step before answering about prior work.
+/// Includes provider/model/fallback metadata matching OpenClaw's output format.
 pub struct MemorySearchTool {
     memory: Arc<MemoryDb>,
+    disabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -26,7 +28,12 @@ fn default_max_results() -> usize { 10 }
 
 impl MemorySearchTool {
     pub fn new(memory: Arc<MemoryDb>) -> Self {
-        Self { memory }
+        Self { memory, disabled: false }
+    }
+
+    /// Create a disabled memory search tool (matching OpenClaw's disabled state).
+    pub fn new_disabled(memory: Arc<MemoryDb>) -> Self {
+        Self { memory, disabled: true }
     }
 }
 
@@ -64,6 +71,10 @@ impl Tool for MemorySearchTool {
     fn requires_confirmation(&self) -> bool { false }
 
     async fn execute(&self, args_json: &str) -> Result<String> {
+        if self.disabled {
+            return Ok("Memory search is currently disabled.".to_string());
+        }
+
         let args: MemorySearchArgs = serde_json::from_str(args_json)
             .context("Invalid memory_search arguments")?;
 
@@ -73,12 +84,28 @@ impl Tool for MemorySearchTool {
             return Ok("No memory results found for this query.".to_string());
         }
 
+        // Build output with provider/model/fallback metadata (matching OpenClaw format)
         let mut output = Vec::new();
         for r in &results {
             let citation = r.citation.as_deref().unwrap_or(&r.path);
+            let mut meta_parts = Vec::new();
+            if let Some(ref provider) = r.provider {
+                meta_parts.push(format!("provider: {}", provider));
+            }
+            if let Some(ref model) = r.model {
+                meta_parts.push(format!("model: {}", model));
+            }
+            if r.fallback {
+                meta_parts.push("fallback: true".to_string());
+            }
+            let meta_str = if meta_parts.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", meta_parts.join(", "))
+            };
             output.push(format!(
-                "--- Source: {} (score: {:.2}) ---\n{}",
-                citation, r.score, r.snippet
+                "--- Source: {} (score: {:.2}){} ---\n{}",
+                citation, r.score, meta_str, r.snippet
             ));
         }
 

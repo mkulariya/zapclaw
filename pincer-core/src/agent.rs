@@ -10,6 +10,7 @@ use crate::llm::{
 };
 use crate::memory::MemoryDb;
 use crate::sanitizer::InputSanitizer;
+use crate::session::SessionStore;
 
 /// Tool trait — implemented by all Pincer tools.
 ///
@@ -246,6 +247,7 @@ pub struct Agent {
     config: Config,
     runtime_info: RuntimeInfo,
     workspace_dir: PathBuf,
+    session_store: Option<SessionStore>,
 }
 
 impl Agent {
@@ -257,6 +259,7 @@ impl Agent {
         config: Config,
     ) -> Self {
         let workspace_dir = config.workspace_path.clone();
+        let session_store = Some(SessionStore::new(&workspace_dir));
         let mut runtime_info = RuntimeInfo::detect();
         runtime_info.model = Some(config.model_name.clone());
         Self {
@@ -267,7 +270,18 @@ impl Agent {
             workspace_dir,
             runtime_info,
             config,
+            session_store,
         }
+    }
+
+    /// Get the session store (for external session management).
+    pub fn session_store(&self) -> Option<&SessionStore> {
+        self.session_store.as_ref()
+    }
+
+    /// Get a reference to the LLM client.
+    pub fn llm(&self) -> &dyn LlmClient {
+        self.llm.as_ref()
     }
 
     /// Run a task through the agent loop.
@@ -281,24 +295,42 @@ impl Agent {
 
         log::info!("🦞 Starting task: {}", &sanitized_task[..sanitized_task.len().min(100)]);
 
+        // Session persistence: ensure session exists
+        if let Some(ref store) = self.session_store {
+            if !store.session_exists(session_id) {
+                store.create_session(session_id, &self.config.model_name).ok();
+            }
+        }
+
         // Log to audit trail
         self.memory.log_action("task_start", Some(&sanitized_task), None)?;
 
         // 2. Store user message in memory
         self.memory.store(session_id, "user", &sanitized_task)?;
 
-        // 3. Build initial messages with system prompt
+        // 3. Build initial messages with system prompt + user message
         let system_prompt = self.build_system_prompt();
-        let mut messages = vec![ChatMessage {
-            role: "system".to_string(),
-            content: system_prompt,
+        let user_msg = ChatMessage {
+            role: "user".to_string(),
+            content: sanitized_task.clone(),
             tool_call_id: None,
             tool_calls: None,
-        }];
+        };
 
-        // Auto-recall: inject recent memory context into system prompt
-        // (Full conversation history is managed by the REPL, not replayed from files.
-        //  The agent uses memory_search/memory_get tools for deeper recall.)
+        // Session persistence: write user message
+        if let Some(ref store) = self.session_store {
+            store.append_message(session_id, &user_msg).ok();
+        }
+
+        let mut messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            user_msg,
+        ];
 
         // 4. Agent loop: observe-plan-act-reflect
         let tool_defs = self.tools.definitions();
@@ -324,11 +356,17 @@ impl Agent {
 
             log::info!("🔄 Step {}/{}", step, self.config.max_steps);
 
-            // Call LLM
-            let response = self.llm
-                .complete(&messages, &tool_defs)
-                .await
-                .context("LLM completion failed")?;
+            // History truncation: fit within 80% of context window
+            let budget = (self.config.context_window_tokens as f64 * 0.8) as usize;
+            let messages_for_llm = crate::truncation::truncate_history(&messages, budget, 3);
+
+            // Call LLM with overflow recovery
+            let response = match self.call_llm_with_overflow_recovery(
+                &mut messages, &messages_for_llm, &tool_defs,
+            ).await {
+                Ok(resp) => resp,
+                Err(e) => return Err(e).context("LLM completion failed"),
+            };
 
             // Handle text response
             if let Some(ref content) = response.content {
@@ -342,24 +380,32 @@ impl Agent {
             if response.tool_calls.is_empty() {
                 // Add assistant response to messages and memory
                 if let Some(ref content) = response.content {
-                    messages.push(ChatMessage {
+                    let asst_msg = ChatMessage {
                         role: "assistant".to_string(),
                         content: content.clone(),
                         tool_call_id: None,
                         tool_calls: None,
-                    });
+                    };
+                    if let Some(ref store) = self.session_store {
+                        store.append_message(session_id, &asst_msg).ok();
+                    }
+                    messages.push(asst_msg);
                     self.memory.store(session_id, "assistant", content)?;
                 }
                 break;
             }
 
             // Add assistant message with tool calls
-            messages.push(ChatMessage {
+            let asst_tc_msg = ChatMessage {
                 role: "assistant".to_string(),
                 content: response.content.clone().unwrap_or_default(),
                 tool_call_id: None,
                 tool_calls: Some(response.tool_calls.clone()),
-            });
+            };
+            if let Some(ref store) = self.session_store {
+                store.append_message(session_id, &asst_tc_msg).ok();
+            }
+            messages.push(asst_tc_msg);
 
             // Execute each tool call
             for tool_call in &response.tool_calls {
@@ -375,12 +421,16 @@ impl Agent {
                 );
 
                 // Add tool result to messages
-                messages.push(ChatMessage {
+                let tool_msg = ChatMessage {
                     role: "tool".to_string(),
                     content: tool_result.clone(),
                     tool_call_id: Some(tool_call.id.clone()),
                     tool_calls: None,
-                });
+                };
+                if let Some(ref store) = self.session_store {
+                    store.append_message(session_id, &tool_msg).ok();
+                }
+                messages.push(tool_msg);
 
                 // Log tool execution
                 self.memory.log_action(
@@ -406,6 +456,8 @@ impl Agent {
         task: &str,
         tx: tokio::sync::mpsc::Sender<crate::llm::StreamChunk>,
     ) -> Result<String> {
+        use crate::llm::StreamChunk;
+
         // 1. SANITIZE: Clean and validate user input
         let sanitized_task = self.sanitizer
             .sanitize(task)
@@ -413,20 +465,45 @@ impl Agent {
 
         log::info!("🦞 Starting task (streaming): {}", &sanitized_task[..sanitized_task.len().min(100)]);
 
+        // Session persistence: ensure session exists
+        if let Some(ref store) = self.session_store {
+            if !store.session_exists(session_id) {
+                store.create_session(session_id, &self.config.model_name).ok();
+            }
+        }
+
+        // Emit lifecycle start
+        let _ = tx.send(StreamChunk::LifecycleEvent { phase: "start".to_string() }).await;
+
         // Log to audit trail
         self.memory.log_action("task_start", Some(&sanitized_task), None)?;
 
         // 2. Store user message in memory
         self.memory.store(session_id, "user", &sanitized_task)?;
 
-        // 3. Build initial messages with system prompt
+        // 3. Build initial messages with system prompt + user message
         let system_prompt = self.build_system_prompt();
-        let mut messages = vec![ChatMessage {
-            role: "system".to_string(),
-            content: system_prompt,
+        let user_msg = ChatMessage {
+            role: "user".to_string(),
+            content: sanitized_task.clone(),
             tool_call_id: None,
             tool_calls: None,
-        }];
+        };
+
+        // Session persistence: write user message
+        if let Some(ref store) = self.session_store {
+            store.append_message(session_id, &user_msg).ok();
+        }
+
+        let mut messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            user_msg,
+        ];
 
         // 4. Agent loop: observe-plan-act-reflect (streaming version)
         let tool_defs = self.tools.definitions();
@@ -450,13 +527,24 @@ impl Agent {
                 break;
             }
 
+            // Emit step lifecycle event
+            let _ = tx.send(StreamChunk::LifecycleEvent { phase: "step".to_string() }).await;
             log::info!("🔄 Step {}/{}", step, self.config.max_steps);
 
-            // Call LLM with streaming
-            let response = self.llm
-                .complete_stream(&messages, &tool_defs, tx.clone())
-                .await
-                .context("LLM streaming completion failed")?;
+            // History truncation: fit within 80% of context window
+            let budget = (self.config.context_window_tokens as f64 * 0.8) as usize;
+            let messages_for_llm = crate::truncation::truncate_history(&messages, budget, 3);
+
+            // Call LLM with streaming + overflow recovery
+            let response = match self.call_llm_stream_with_overflow_recovery(
+                &mut messages, &messages_for_llm, &tool_defs, tx.clone(),
+            ).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let _ = tx.send(StreamChunk::LifecycleEvent { phase: "error".to_string() }).await;
+                    return Err(e).context("LLM streaming completion failed");
+                }
+            };
 
             // Handle text response
             if let Some(ref content) = response.content {
@@ -468,43 +556,73 @@ impl Agent {
 
             // If no tool calls, we're done
             if response.tool_calls.is_empty() {
-                // Add assistant response to messages and memory
                 if let Some(ref content) = response.content {
-                    messages.push(ChatMessage {
+                    let asst_msg = ChatMessage {
                         role: "assistant".to_string(),
                         content: content.clone(),
                         tool_call_id: None,
                         tool_calls: None,
-                    });
+                    };
+                    if let Some(ref store) = self.session_store {
+                        store.append_message(session_id, &asst_msg).ok();
+                    }
+                    messages.push(asst_msg);
                     self.memory.store(session_id, "assistant", content)?;
                 }
                 break;
             }
 
             // Add assistant message with tool calls
-            messages.push(ChatMessage {
+            let asst_tc_msg = ChatMessage {
                 role: "assistant".to_string(),
                 content: response.content.clone().unwrap_or_default(),
                 tool_call_id: None,
                 tool_calls: Some(response.tool_calls.clone()),
-            });
+            };
+            if let Some(ref store) = self.session_store {
+                store.append_message(session_id, &asst_tc_msg).ok();
+            }
+            messages.push(asst_tc_msg);
 
-            // Execute each tool call
+            // Execute each tool call with streaming events
             for tool_call in &response.tool_calls {
+                // Emit tool start
+                let _ = tx.send(StreamChunk::ToolStart {
+                    name: tool_call.function.name.clone(),
+                    tool_call_id: tool_call.id.clone(),
+                }).await;
+
                 let tool_result = self
                     .execute_tool_call(tool_call)
                     .await
                     .unwrap_or_else(|e| format!("Error: {}", e));
 
+                let is_error = tool_result.starts_with("Error:");
+
+                // Emit tool end
+                let _ = tx.send(StreamChunk::ToolEnd {
+                    name: tool_call.function.name.clone(),
+                    tool_call_id: tool_call.id.clone(),
+                    result: tool_result[..tool_result.len().min(200)].to_string(),
+                    is_error,
+                }).await;
+
                 // Add tool result to messages
-                messages.push(ChatMessage {
+                let tool_msg = ChatMessage {
                     role: "tool".to_string(),
                     content: tool_result,
                     tool_call_id: Some(tool_call.id.clone()),
                     tool_calls: None,
-                });
+                };
+                if let Some(ref store) = self.session_store {
+                    store.append_message(session_id, &tool_msg).ok();
+                }
+                messages.push(tool_msg);
             }
         }
+
+        // Emit lifecycle end
+        let _ = tx.send(StreamChunk::LifecycleEvent { phase: "end".to_string() }).await;
 
         // Store final response
         if !final_response.is_empty() {
@@ -514,7 +632,7 @@ impl Agent {
         Ok(final_response)
     }
 
-    /// Execute a single tool call with safety checks.
+    /// Execute a single tool call with safety checks and result truncation.
     async fn execute_tool_call(&self, tool_call: &ToolCall) -> Result<String> {
         let tool_name = &tool_call.function.name;
 
@@ -530,8 +648,6 @@ impl Agent {
                 tool_name,
                 &tool_call.function.arguments[..tool_call.function.arguments.len().min(200)]
             );
-            // In CLI mode, confirmation is handled by the frontend
-            // For now, we proceed (CLI layer handles this)
         }
 
         // Execute with timeout
@@ -546,7 +662,116 @@ impl Agent {
         .map_err(|_| anyhow::anyhow!("Tool '{}' timed out after {}s", tool_name, self.config.tool_timeout_secs))?
         .context(format!("Tool '{}' execution failed", tool_name))?;
 
+        // Truncate oversized tool results (matching OpenClaw's tool-result-truncation)
+        let max_chars = crate::truncation::calculate_max_tool_result_chars(
+            self.config.context_window_tokens,
+        );
+        let result = crate::truncation::truncate_tool_result(&result, max_chars);
+
         Ok(result)
+    }
+
+    /// Call LLM with context overflow recovery (non-streaming).
+    /// Retries up to 3 times on overflow: truncate tool results, compact, aggressive trim.
+    async fn call_llm_with_overflow_recovery(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        messages_for_llm: &[ChatMessage],
+        tool_defs: &[crate::llm::ToolDefinition],
+    ) -> Result<crate::llm::LlmResponse> {
+        use crate::llm::is_context_overflow_error;
+        use crate::truncation::{calculate_max_tool_result_chars, truncate_tool_result, truncate_history};
+
+        const MAX_OVERFLOW_RETRIES: usize = 3;
+        let mut attempt_messages = messages_for_llm.to_vec();
+
+        for attempt in 0..=MAX_OVERFLOW_RETRIES {
+            match self.llm.complete(&attempt_messages, tool_defs).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if is_context_overflow_error(&e) && attempt < MAX_OVERFLOW_RETRIES => {
+                    log::warn!(
+                        "Context overflow (attempt {}/{}), recovering...",
+                        attempt + 1, MAX_OVERFLOW_RETRIES
+                    );
+
+                    // Strategy 1: Truncate oversized tool results in history
+                    let max_chars = calculate_max_tool_result_chars(
+                        self.config.context_window_tokens / 2, // tighter limit on retry
+                    );
+                    for msg in messages.iter_mut() {
+                        if msg.role == "tool" && msg.content.len() > max_chars {
+                            msg.content = truncate_tool_result(&msg.content, max_chars);
+                        }
+                    }
+
+                    // Strategy 2: LLM-driven memory compaction
+                    if attempt >= 1 {
+                        let _ = self.memory.compact(3);
+                    }
+
+                    // Strategy 3: Aggressive history truncation
+                    let budget = if attempt >= 2 {
+                        (self.config.context_window_tokens as f64 * 0.4) as usize
+                    } else {
+                        (self.config.context_window_tokens as f64 * 0.6) as usize
+                    };
+                    attempt_messages = truncate_history(messages, budget, 2);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        anyhow::bail!("Context overflow persisted after {} retries", MAX_OVERFLOW_RETRIES)
+    }
+
+    /// Call LLM with streaming + context overflow recovery.
+    async fn call_llm_stream_with_overflow_recovery(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        messages_for_llm: &[ChatMessage],
+        tool_defs: &[crate::llm::ToolDefinition],
+        tx: tokio::sync::mpsc::Sender<crate::llm::StreamChunk>,
+    ) -> Result<crate::llm::LlmResponse> {
+        use crate::llm::is_context_overflow_error;
+        use crate::truncation::{calculate_max_tool_result_chars, truncate_tool_result, truncate_history};
+
+        const MAX_OVERFLOW_RETRIES: usize = 3;
+        let mut attempt_messages = messages_for_llm.to_vec();
+
+        for attempt in 0..=MAX_OVERFLOW_RETRIES {
+            match self.llm.complete_stream(&attempt_messages, tool_defs, tx.clone()).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if is_context_overflow_error(&e) && attempt < MAX_OVERFLOW_RETRIES => {
+                    log::warn!(
+                        "Context overflow in stream (attempt {}/{}), recovering...",
+                        attempt + 1, MAX_OVERFLOW_RETRIES
+                    );
+
+                    let max_chars = calculate_max_tool_result_chars(
+                        self.config.context_window_tokens / 2,
+                    );
+                    for msg in messages.iter_mut() {
+                        if msg.role == "tool" && msg.content.len() > max_chars {
+                            msg.content = truncate_tool_result(&msg.content, max_chars);
+                        }
+                    }
+
+                    if attempt >= 1 {
+                        let _ = self.memory.compact(3);
+                    }
+
+                    let budget = if attempt >= 2 {
+                        (self.config.context_window_tokens as f64 * 0.4) as usize
+                    } else {
+                        (self.config.context_window_tokens as f64 * 0.6) as usize
+                    };
+                    attempt_messages = truncate_history(messages, budget, 2);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        anyhow::bail!("Context overflow persisted after {} retries", MAX_OVERFLOW_RETRIES)
     }
 
     /// Build the system prompt — OpenClaw-parity dynamic multi-section prompt.

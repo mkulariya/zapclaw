@@ -66,11 +66,13 @@ pub struct TokenUsage {
 }
 
 /// Streaming chunk — emitted token-by-token during SSE streaming.
-/// Matches OpenClaw's streaming architecture.
+/// Matches OpenClaw's streaming architecture with full event types.
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     /// Text content delta
     TextDelta(String),
+    /// Reasoning/thinking content delta (content inside <think> tags)
+    ReasoningDelta(String),
     /// Tool call delta (index, id, function name, argument fragment)
     ToolCallDelta {
         index: usize,
@@ -78,8 +80,34 @@ pub enum StreamChunk {
         name: Option<String>,
         arguments: Option<String>,
     },
+    /// Tool execution started
+    ToolStart {
+        name: String,
+        tool_call_id: String,
+    },
+    /// Tool execution ended with result
+    ToolEnd {
+        name: String,
+        tool_call_id: String,
+        result: String,
+        is_error: bool,
+    },
+    /// Agent lifecycle event
+    LifecycleEvent {
+        phase: String, // "start", "end", "error", "step"
+    },
     /// Stream is complete; final accumulated response
     Done(LlmResponse),
+}
+
+/// Detect context length exceeded errors from LLM API responses.
+pub fn is_context_overflow_error(error: &anyhow::Error) -> bool {
+    let msg = error.to_string().to_lowercase();
+    msg.contains("context_length_exceeded")
+        || msg.contains("context window")
+        || msg.contains("maximum context length")
+        || msg.contains("too many tokens")
+        || (msg.contains("400") && (msg.contains("token") || msg.contains("length")))
 }
 
 /// LLM client trait — abstraction over any OpenAI-compatible API.

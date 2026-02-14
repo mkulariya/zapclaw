@@ -270,3 +270,144 @@ fn test_confiner_comprehensive() {
     assert!(confiner.validate_path(std::path::Path::new("/etc/passwd")).is_err());
     assert!(confiner.validate_path(std::path::Path::new("/root/.ssh/id_rsa")).is_err());
 }
+
+// --- Context overflow recovery test ---
+
+/// Mock LLM client that simulates context overflow on first call, then succeeds.
+struct OverflowLlmClient {
+    call_count: AtomicUsize,
+}
+
+impl OverflowLlmClient {
+    fn new() -> Self {
+        Self { call_count: AtomicUsize::new(0) }
+    }
+}
+
+#[async_trait]
+impl LlmClient for OverflowLlmClient {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
+        let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+        if count == 0 {
+            // First call: simulate context overflow
+            anyhow::bail!("context_length_exceeded: This model's maximum context length is 4096 tokens");
+        }
+        // Subsequent calls: succeed
+        Ok(LlmResponse {
+            content: Some("Recovered after overflow.".to_string()),
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+        })
+    }
+
+    fn model_name(&self) -> &str {
+        "overflow-mock"
+    }
+}
+
+#[tokio::test]
+async fn test_context_overflow_recovery() {
+    let llm = Arc::new(OverflowLlmClient::new());
+    let memory = Arc::new(MemoryDb::in_memory().unwrap());
+    let tools = ToolRegistry::new();
+    let config = Config {
+        max_steps: 5,
+        require_confirmation: false,
+        tool_timeout_secs: 5,
+        context_window_tokens: 4096,
+        ..Config::default()
+    };
+    let agent = Agent::new(llm, memory, tools, config);
+
+    // Should recover from the overflow and succeed
+    let result = agent.run("overflow-test", "Hello").await.unwrap();
+    assert_eq!(result, "Recovered after overflow.");
+}
+
+// --- Session persistence test ---
+
+#[tokio::test]
+async fn test_session_persistence() {
+    let agent = make_agent(vec![
+        MockLlmClient::simple_response("Session test response."),
+    ]);
+
+    let session_id = "persist-test-1";
+    let result = agent.run(session_id, "Test persistence").await.unwrap();
+    assert_eq!(result, "Session test response.");
+
+    // Verify session was created and messages recorded
+    if let Some(store) = agent.session_store() {
+        assert!(store.session_exists(session_id));
+        let messages = store.load_session_messages(session_id).unwrap();
+        // Should have: user message + assistant message
+        assert!(messages.len() >= 2);
+        assert_eq!(messages[0].role, "user");
+        assert!(messages.iter().any(|m| m.role == "assistant"));
+    }
+}
+
+// --- Sync with options test ---
+
+#[test]
+fn test_sync_with_options_force_reindex() {
+    let db = MemoryDb::in_memory().unwrap();
+    db.store("s1", "user", "initial content").unwrap();
+
+    // First sync
+    let count1 = db.sync("test-model").unwrap();
+    assert!(count1 > 0);
+
+    // Normal sync should skip (hash unchanged)
+    let count2 = db.sync("test-model").unwrap();
+    assert_eq!(count2, 0);
+
+    // Force reindex should re-process all files
+    let count3 = db.sync_with_options("test-model", true, None).unwrap();
+    assert!(count3 > 0);
+}
+
+// --- Compaction metadata test ---
+
+#[test]
+fn test_compaction_metadata() {
+    let db = MemoryDb::in_memory().unwrap();
+
+    // Initially empty
+    let meta = db.compaction_meta().unwrap();
+    assert_eq!(meta.compaction_count, 0);
+    assert!(meta.last_compact_at.is_none());
+
+    // Update
+    let updated_meta = pincer_core::memory::CompactionMeta {
+        compaction_count: 3,
+        last_compact_at: Some("2026-02-15T12:00:00Z".to_string()),
+    };
+    db.update_compaction_meta(&updated_meta).unwrap();
+
+    let read_back = db.compaction_meta().unwrap();
+    assert_eq!(read_back.compaction_count, 3);
+    assert_eq!(read_back.last_compact_at.as_deref(), Some("2026-02-15T12:00:00Z"));
+}
+
+// --- Memory search result metadata test ---
+
+#[test]
+fn test_search_result_metadata() {
+    let db = MemoryDb::in_memory().unwrap();
+    db.store("s1", "user", "The sky is blue and beautiful").unwrap();
+    db.sync("test-model").unwrap();
+
+    let results = db.search("sky blue", 5, 0.0).unwrap();
+    assert!(!results.is_empty());
+
+    // Keyword-only results should have fallback=true, no provider/model
+    let r = &results[0];
+    assert!(r.fallback, "keyword-only results should be fallback");
+    assert!(r.provider.is_none());
+}

@@ -5,6 +5,7 @@ use pincer_core::config::{Config, LlmMode};
 use pincer_core::confiner::Confiner;
 use pincer_core::llm::OpenAiCompatibleClient;
 use pincer_core::memory::MemoryDb;
+use pincer_core::session::SessionStore;
 use pincer_core::StreamChunk;
 use tokio::sync::mpsc;
 use pincer_tools::browser_tool::BrowserTool;
@@ -95,6 +96,23 @@ async fn run_with_streaming(agent: &Agent, session_id: &str, task: &str) -> Resu
                 }
                 StreamChunk::ToolCallDelta { .. } => {
                     // Tool calls are handled silently, final output will show results
+                }
+                StreamChunk::ToolStart { name, .. } => {
+                    print!("  [Running {}...", name);
+                    stdout.flush().ok();
+                }
+                StreamChunk::ToolEnd { is_error, .. } => {
+                    if is_error {
+                        println!(" ERROR]");
+                    } else {
+                        println!(" done]");
+                    }
+                }
+                StreamChunk::ReasoningDelta(_) => {
+                    // Internal reasoning — not displayed
+                }
+                StreamChunk::LifecycleEvent { .. } => {
+                    // Lifecycle events — optional status display (silent for now)
                 }
                 StreamChunk::Done(_) => {
                     // Final response received, stop streaming
@@ -325,7 +343,8 @@ async fn main() -> Result<()> {
 
     let agent = Agent::new(llm, memory.clone(), tools, config);
 
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_store = SessionStore::new(&workspace);
+    let mut session_id = uuid::Uuid::new_v4().to_string();
 
     // Start cron background loop
     let cron_workspace = workspace.clone();
@@ -371,27 +390,79 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // /compact command
+                // /compact command — LLM-driven compaction with fallback
                 if input == "/compact" || input.starts_with("/compact ") {
                     let keep_days: usize = input
                         .strip_prefix("/compact ")
                         .and_then(|s| s.trim().parse().ok())
                         .unwrap_or(7);
 
-                    match memory.compact(keep_days) {
+                    // Try LLM-driven compaction first, fall back to rule-based
+                    let result = memory.compact_llm(agent.llm(), keep_days).await;
+                    match result {
                         Ok(result) => {
                             if result.files_compacted == 0 {
                                 println!("Nothing to compact — memory is lean.");
                             } else {
+                                let summary_note = if result.summary.is_some() {
+                                    " (LLM-summarized)"
+                                } else {
+                                    " (rule-based)"
+                                };
                                 println!(
-                                    "✅ Compacted {} files, freed ~{} chars (~{} tokens)",
+                                    "Compacted {} files, freed ~{} chars (~{} tokens){}",
                                     result.files_compacted,
                                     result.chars_freed,
-                                    result.chars_freed / 4
+                                    result.chars_freed / 4,
+                                    summary_note,
                                 );
+                                if let (Some(before), Some(after)) = (result.tokens_before, result.tokens_after) {
+                                    println!("  Tokens: {} -> {}", before, after);
+                                }
                             }
                         }
-                        Err(e) => eprintln!("❌ Compaction error: {:#}", e),
+                        Err(e) => eprintln!("Compaction error: {:#}", e),
+                    }
+                    continue;
+                }
+
+                // /resume command — list or resume a previous session
+                if input == "/resume" || input.starts_with("/resume ") {
+                    let arg = input.strip_prefix("/resume").unwrap_or("").trim();
+
+                    if arg.is_empty() {
+                        // List recent sessions
+                        match session_store.list_sessions() {
+                            Ok(sessions) => {
+                                if sessions.is_empty() {
+                                    println!("No previous sessions found.");
+                                } else {
+                                    println!("\nRecent sessions:");
+                                    for (i, s) in sessions.iter().rev().take(10).enumerate() {
+                                        println!(
+                                            "  {}. {} (model: {}, messages: {}, updated: {})",
+                                            i + 1, s.id, s.model, s.message_count,
+                                            &s.updated_at[..s.updated_at.len().min(19)]
+                                        );
+                                    }
+                                    println!("\nUse /resume <session_id> to continue a session.\n");
+                                }
+                            }
+                            Err(e) => eprintln!("Error listing sessions: {:#}", e),
+                        }
+                    } else {
+                        // Resume specific session
+                        match session_store.load_session_messages(arg) {
+                            Ok(messages) => {
+                                session_id = arg.to_string();
+                                println!(
+                                    "Resumed session {} ({} messages loaded)\n",
+                                    session_id,
+                                    messages.len()
+                                );
+                            }
+                            Err(e) => eprintln!("Error resuming session: {:#}", e),
+                        }
                     }
                     continue;
                 }
@@ -489,6 +560,8 @@ fn print_help() {
     help         — Show this help
     tools        — List available tools
     /compact [N] — Compact memory (keep N days, default: 7)
+    /resume      — List recent sessions
+    /resume <id> — Resume a previous session
     /update      — Self-update from git
     /status      — Show session info
 
