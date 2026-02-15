@@ -1,0 +1,29 @@
+[
+  {
+    "id": "test-session",
+    "created_at": "2026-02-15T17:44:43.833274757+00:00",
+    "updated_at": "2026-02-15T17:44:43.833293890+00:00",
+    "model": "phi3:mini",
+    "total_tokens": 0,
+    "compaction_count": 0,
+    "message_count": 0
+  },
+  {
+    "id": "overflow-test",
+    "created_at": "2026-02-15T17:44:43.893776228+00:00",
+    "updated_at": "2026-02-15T17:44:43.893796683+00:00",
+    "model": "phi3:mini",
+    "total_tokens": 0,
+    "compaction_count": 0,
+    "message_count": 0
+  },
+  {
+    "id": "persist-test-1",
+    "created_at": "2026-02-15T17:44:44.202564684+00:00",
+    "updated_at": "2026-02-15T17:44:44.202577060+00:00",
+    "model": "phi3:mini",
+    "total_tokens": 0,
+    "compaction_count": 0,
+    "message_count": 0
+  }
+]

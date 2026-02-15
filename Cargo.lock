@@ -1455,97 +1455,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
-name = "pincer-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "env_logger",
- "log",
- "pincer-core",
- "pincer-tools",
- "pincer-tunnels",
- "reqwest",
- "rustyline",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "pincer-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "criterion",
- "env_logger",
- "futures-core",
- "hostname",
- "log",
- "pincer-tools",
- "regex",
- "reqwest",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-stream",
- "uuid",
-]
-
-[[package]]
-name = "pincer-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "log",
- "pincer-core",
- "readability-rust",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "pincer-tunnels"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "bytes",
- "chrono",
- "http-body-util",
- "hyper",
- "hyper-util",
- "log",
- "pincer-core",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3169,6 +3078,96 @@ dependencies = [
  "quote",
  "syn 2.0.115",
  "synstructure",
+]
+
+[[package]]
+name = "zapclaw-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+ "reqwest",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "zapclaw-core",
+ "zapclaw-tools",
+ "zapclaw-tunnels",
+]
+
+[[package]]
+name = "zapclaw-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "criterion",
+ "env_logger",
+ "futures-core",
+ "hostname",
+ "log",
+ "regex",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "uuid",
+ "zapclaw-tools",
+]
+
+[[package]]
+name = "zapclaw-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "log",
+ "readability-rust",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+ "uuid",
+ "zapclaw-core",
+]
+
+[[package]]
+name = "zapclaw-tunnels"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+ "uuid",
+ "zapclaw-core",
 ]
 
 [[package]]

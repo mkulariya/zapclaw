@@ -1,0 +1,22 @@
+{"timestamp":"2026-02-15T17:44:43.831074820+00:00","role":"header","content":"Session test-session started"}
+{"timestamp":"2026-02-15T17:44:43.836039023+00:00","role":"user","content":"Use a tool"}
+{"timestamp":"2026-02-15T17:44:43.837260687+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"nonexistent_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-15T17:44:43.838336235+00:00","role":"tool","content":"Error: Unknown tool: nonexistent_tool","tool_call_id":"call_1"}
+{"timestamp":"2026-02-15T17:44:43.839533470+00:00","role":"assistant","content":"That tool doesn't exist."}
+{"timestamp":"2026-02-15T17:44:43.856682488+00:00","role":"user","content":"What is 42?"}
+{"timestamp":"2026-02-15T17:44:43.867607234+00:00","role":"assistant","content":"The answer is 42."}
+{"timestamp":"2026-02-15T17:44:43.902204071+00:00","role":"user","content":"Loop forever"}
+{"timestamp":"2026-02-15T17:44:43.902498634+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"message\": \"1\"}"}}]}
+{"timestamp":"2026-02-15T17:44:43.902784616+00:00","role":"tool","content":"Echo: 1","tool_call_id":"call_1"}
+{"timestamp":"2026-02-15T17:44:43.903058701+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"message\": \"2\"}"}}]}
+{"timestamp":"2026-02-15T17:44:43.903277217+00:00","role":"tool","content":"Echo: 2","tool_call_id":"call_1"}
+{"timestamp":"2026-02-15T17:44:43.903545779+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"message\": \"3\"}"}}]}
+{"timestamp":"2026-02-15T17:44:43.903772622+00:00","role":"tool","content":"Echo: 3","tool_call_id":"call_1"}
+{"timestamp":"2026-02-15T17:44:43.904227243+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"message\": \"4\"}"}}]}
+{"timestamp":"2026-02-15T17:44:43.904461656+00:00","role":"tool","content":"Echo: 4","tool_call_id":"call_1"}
+{"timestamp":"2026-02-15T17:44:43.904766840+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"message\": \"5\"}"}}]}
+{"timestamp":"2026-02-15T17:44:43.905022945+00:00","role":"tool","content":"Echo: 5","tool_call_id":"call_1"}
+{"timestamp":"2026-02-15T17:44:43.922202256+00:00","role":"user","content":"Echo hello"}
+{"timestamp":"2026-02-15T17:44:43.922570933+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"message\": \"hello\"}"}}]}
+{"timestamp":"2026-02-15T17:44:43.922874173+00:00","role":"tool","content":"Echo: hello","tool_call_id":"call_1"}
+{"timestamp":"2026-02-15T17:44:43.923261538+00:00","role":"assistant","content":"The echo returned: hello"}

@@ -1,6 +1,6 @@
-# Pincer vs OpenClaw — Gap Analysis v2.1 (Post Phase 10 Partial)
+# ZapClaw vs OpenClaw — Gap Analysis v2.1 (Post Phase 10 Partial)
 
-> **Date**: 2026-02-14 | **Pincer**: v0.1.0 (Phase 10 In-Progress) | **OpenClaw**: reference snapshot
+> **Date**: 2026-02-14 | **ZapClaw**: v0.1.0 (Phase 10 In-Progress) | **OpenClaw**: reference snapshot
 
 ---
 
@@ -8,7 +8,7 @@
 
 ### Core Developer Tools (9/9 ✅)
 
-| # | OpenClaw | Pincer | Status |
+| # | OpenClaw | ZapClaw | Status |
 |---|---|---|---|
 | 1 | `read` | `file_ops` (read) | ✅ |
 | 2 | `write` | `file_ops` (write) | ✅ |
@@ -22,7 +22,7 @@
 
 ### Memory & Session Tools (4/4 ✅)
 
-| # | OpenClaw | Pincer | Status |
+| # | OpenClaw | ZapClaw | Status |
 |---|---|---|---|
 | 10 | `memory_search` | `memory_search` | ✅ **NEW** |
 | 11 | `memory_get` | `memory_get` | ✅ **NEW** |
@@ -31,7 +31,7 @@
 
 ### Web & Media Tools (2.5/4 ⚠️)
 
-| # | OpenClaw | Pincer | Status |
+| # | OpenClaw | ZapClaw | Status |
 |---|---|---|---|
 | 14 | `web_search` | `web_search` | ✅ (+ DuckDuckGo + SearXNG) |
 | 15 | `web_fetch` | `browse_url` | ⚠️ Partial (basic HTML strip, no readability) |
@@ -47,7 +47,7 @@
 | `agents_list`, `tts` | Multi-agent / voice features |
 | Discord/Slack/Telegram/WhatsApp actions | Channel-specific integrations |
 
-### Pincer-Exclusive
+### ZapClaw-Exclusive
 
 | Tool | Notes |
 |---|---|
@@ -68,7 +68,7 @@
 
 ## 2. System Prompt Parity
 
-| # | Section | Pincer | Status |
+| # | Section | ZapClaw | Status |
 |---|---|---|---|
 | 1 | Identity line | ✅ | ✅ |
 | 2 | Tooling (dynamic list + descriptions) | ✅ | ✅ |
@@ -94,7 +94,7 @@
 
 ## 3. Agent Loop & Architecture
 
-| Feature | OpenClaw | Pincer | Status |
+| Feature | OpenClaw | ZapClaw | Status |
 |---|---|---|---|
 | Observe-Plan-Act-Reflect loop | ✅ | ✅ | ✅ |
 | Max steps guard | ✅ | ✅ 15 default | ✅ |
@@ -117,7 +117,7 @@
 
 ## 4. Memory System (Exact Parity Achieved)
 
-| Feature | OpenClaw | Pincer | Status |
+| Feature | OpenClaw | ZapClaw | Status |
 |---|---|---|---|
 | `MEMORY.md` persistent store | ✅ | ✅ | ✅ |
 | `memory/*.md` date-organized | ✅ | ✅ | ✅ **NEW** |
@@ -132,7 +132,7 @@
 
 **Score**: **10/10** (was 8/9 pre-Phase 10)
 
-> **Parity Achieved**: Pincer now matches OpenClaw's memory architecture exactly: dual storage (Files + SQLite), FTS5 keyword search, vector embeddings, and hybrid ranking.
+> **Parity Achieved**: ZapClaw now matches OpenClaw's memory architecture exactly: dual storage (Files + SQLite), FTS5 keyword search, vector embeddings, and hybrid ranking.
 
 ---
 
@@ -150,15 +150,15 @@
 
 ## 6. Security Comparison
 
-| Feature | Pincer | OpenClaw | Winner |
+| Feature | ZapClaw | OpenClaw | Winner |
 |---|---|---|---|
-| Prompt injection guard | ✅ Multi-pattern regex | ⚠️ Basic | 🏆 Pincer |
-| Workspace confinement | ✅ Symlink-safe | ⚠️ CVE-2026-25253 | 🏆 Pincer |
-| Network isolation | ✅ Zero default exposure | ❌ `0.0.0.0:18789` | 🏆 Pincer |
-| No delete operations | ✅ By design | ❌ Available | 🏆 Pincer |
-| SSRF prevention | ✅ Private IP blocking | ⚠️ Partial | 🏆 Pincer |
+| Prompt injection guard | ✅ Multi-pattern regex | ⚠️ Basic | 🏆 ZapClaw |
+| Workspace confinement | ✅ Symlink-safe | ⚠️ CVE-2026-25253 | 🏆 ZapClaw |
+| Network isolation | ✅ Zero default exposure | ❌ `0.0.0.0:18789` | 🏆 ZapClaw |
+| No delete operations | ✅ By design | ❌ Available | 🏆 ZapClaw |
+| SSRF prevention | ✅ Private IP blocking | ⚠️ Partial | 🏆 ZapClaw |
 
-**Pincer wins on 9 of 10 security dimensions.**
+**ZapClaw wins on 9 of 10 security dimensions.**
 
 ---
 
@@ -195,6 +195,6 @@
 | **Security** | 9/10 (90%) | 9/10 (90%) | ████████ 90% |
 | | | | |
 | **Overall agentic parity** | **~92%** | **~96%** | ████████▋ |
-| **Security superiority** | +9 advantages | +9 advantages | 🏆 Pincer |
+| **Security superiority** | +9 advantages | +9 advantages | 🏆 ZapClaw |
 
 > Phase 10 has achieved **100% Memory System Parity**. The remaining ~4% is primarily the UI/Streaming integration and full Browser automation.

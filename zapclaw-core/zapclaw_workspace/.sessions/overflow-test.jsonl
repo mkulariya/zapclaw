@@ -1,0 +1,3 @@
+{"timestamp":"2026-02-15T17:44:43.893310418+00:00","role":"header","content":"Session overflow-test started"}
+{"timestamp":"2026-02-15T17:44:43.895294999+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-15T17:44:43.895575848+00:00","role":"assistant","content":"Recovered after overflow."}

@@ -1,12 +1,12 @@
-# Pincer 🦞
+# ZapClaw 🦞
 
 **Secure, Lightweight, High-Performance AI Agent**
 
-A security-first clone of OpenClaw, built in Rust. Pincer retains >95% of OpenClaw's utility while eliminating all known security vulnerabilities.
+A security-first clone of OpenClaw, built in Rust. ZapClaw retains >95% of OpenClaw's utility while eliminating all known security vulnerabilities.
 
 ---
 
-## Why Pincer?
+## Why ZapClaw?
 
 OpenClaw has critical security issues:
 - **CVE-2026-25253**: 1-click RCE via attacker-controlled content
@@ -14,11 +14,11 @@ OpenClaw has critical security issues:
 - **Prompt injection** vulnerability ("lethal trifecta")
 - **Bloated dependencies**: 385KB lockfile, 60+ npm packages
 
-Pincer fixes all of these while staying lightweight and fast.
+ZapClaw fixes all of these while staying lightweight and fast.
 
 ## Features
 
-| Feature | Pincer | OpenClaw |
+| Feature | ZapClaw | OpenClaw |
 |---|---|---|
 | Language | Rust | Node.js/TypeScript |
 | Binary size | ~15MB | ~500MB+ (with node_modules) |
@@ -39,7 +39,7 @@ Pincer fixes all of these while staying lightweight and fast.
 # 1. Install Rust (one-time, skip if you already have it)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# 2. Install bubblewrap (required — Pincer runs inside a sandbox)
+# 2. Install bubblewrap (required — ZapClaw runs inside a sandbox)
 sudo apt install bubblewrap        # Debian/Ubuntu
 # sudo dnf install bubblewrap      # Fedora
 # sudo pacman -S bubblewrap        # Arch
@@ -49,23 +49,23 @@ sudo apt install bubblewrap        # Debian/Ubuntu
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull phi3:mini
 
-# 4. Install Pincer
-cargo install --git https://github.com/your-org/pincer.git pincer-cli
+# 4. Install ZapClaw
+cargo install --git https://github.com/your-org/zapclaw.git zapclaw-cli
 ```
 
-That's it. Now `pincer` is available as a command from anywhere. It automatically runs inside a bubblewrap sandbox for security.
+That's it. Now `zapclaw` is available as a command from anywhere. It automatically runs inside a bubblewrap sandbox for security.
 
 ### Run
 
 ```bash
 # Interactive REPL
-pincer
+zapclaw
 
 # Single task
-pincer --task "What is sqrt(144) + 3^2?"
+zapclaw --task "What is sqrt(144) + 3^2?"
 
 # Cloud LLM mode (no Ollama needed)
-PINCER_API_KEY="sk-your-key" pincer --model-mode cloud --model-name gpt-4o
+ZAPCLAW_API_KEY="sk-your-key" zapclaw --model-mode cloud --model-name gpt-4o
 ```
 
 ### REPL Commands
@@ -84,8 +84,8 @@ PINCER_API_KEY="sk-your-key" pincer --model-mode cloud --model-name gpt-4o
 ## Architecture
 
 ```
-pincer/
-├── pincer-core/       # Core agent runtime
+zapclaw/
+├── zapclaw-core/       # Core agent runtime
 │   ├── agent.rs           # Observe-Plan-Act-Reflect loop
 │   ├── llm.rs             # OpenAI-compatible client (Ollama + Cloud)
 │   ├── memory.rs          # SQLite session memory (4K token limit)
@@ -93,17 +93,17 @@ pincer/
 │   ├── confiner.rs        # Workspace path confinement
 │   ├── sandbox.rs         # Bubblewrap sandbox enforcement
 │   └── config.rs          # Env-var based configuration
-├── pincer-tools/      # Safe tool implementations
+├── zapclaw-tools/      # Safe tool implementations
 │   ├── math_tool.rs       # Pure Rust math evaluator
 │   ├── file_tool.rs       # Workspace-confined file I/O
 │   ├── browser_tool.rs    # Read-only HTTP browser
 │   └── confirmation.rs    # Human-in-the-loop confirmation
-├── pincer-cli/        # CLI binary (REPL + single-task)
-├── pincer-tunnels/    # Secure communication
+├── zapclaw-cli/        # CLI binary (REPL + single-task)
+├── zapclaw-tunnels/    # Secure communication
 │   ├── outbound.rs        # HTTPS proxy (mTLS, rate limiting)
 │   └── inbound.rs         # JSON-RPC 2.0 server
 └── scripts/
-    ├── pincer-remote.sh   # Remote client (SSH tunnel + JSON-RPC)
+    ├── zapclaw-remote.sh   # Remote client (SSH tunnel + JSON-RPC)
     ├── sandbox.sh         # Deprecated — sandbox is now built-in
     └── gen_certs.sh       # mTLS certificate generator
 ```
@@ -133,16 +133,16 @@ The browser tool blocks all private/local network addresses:
 ## CLI Options
 
 ```
-Pincer 🦞 — Secure, lightweight AI agent
+ZapClaw 🦞 — Secure, lightweight AI agent
 
-Usage: pincer [OPTIONS]
+Usage: zapclaw [OPTIONS]
 
 Options:
-  -w, --workspace <DIR>      Workspace directory [default: ./pincer_workspace]
+  -w, --workspace <DIR>      Workspace directory [default: ./zapclaw_workspace]
   -m, --model-mode <MODE>    LLM mode: "local" or "cloud" [default: local]
   -n, --model-name <NAME>    Model name [default: phi3:mini]
       --api-url <URL>        API base URL
-      --api-key <KEY>        API key [env: PINCER_API_KEY]
+      --api-key <KEY>        API key [env: ZAPCLAW_API_KEY]
       --max-steps <N>        Max agent steps per task [default: 15]
   -t, --task <TASK>          Run single task and exit
       --no-confirm           Disable confirmation prompts
@@ -151,7 +151,7 @@ Options:
       --enable-inbound       Enable remote JSON-RPC server
       --inbound-port <PORT>  Inbound server port [default: 9876]
       --inbound-bind <ADDR>  Bind address [default: 127.0.0.1]
-      --inbound-api-key <KEY> API key for remote auth [env: PINCER_INBOUND_KEY]
+      --inbound-api-key <KEY> API key for remote auth [env: ZAPCLAW_INBOUND_KEY]
   -h, --help                 Print help
   -V, --version              Print version
 ```
@@ -160,15 +160,15 @@ Options:
 
 | Variable | Description | Default |
 |---|---|---|
-| `PINCER_WORKSPACE` | Workspace directory | `./pincer_workspace` |
-| `PINCER_LLM_MODE` | `local` or `cloud` | `local` |
-| `PINCER_API_BASE_URL` | LLM API endpoint | `http://localhost:11434/v1` |
-| `PINCER_API_KEY` | API key (cloud mode) | — |
-| `PINCER_MODEL` | Model identifier | `phi3:mini` |
-| `PINCER_MAX_STEPS` | Max loop iterations | `15` |
-| `PINCER_TOOL_TIMEOUT` | Tool timeout (seconds) | `5` |
-| `PINCER_SANDBOXED` | Set to `1` when running inside sandbox (auto-set) | — |
-| `PINCER_INBOUND_KEY` | API key for remote inbound tunnel | — |
+| `ZAPCLAW_WORKSPACE` | Workspace directory | `./zapclaw_workspace` |
+| `ZAPCLAW_LLM_MODE` | `local` or `cloud` | `local` |
+| `ZAPCLAW_API_BASE_URL` | LLM API endpoint | `http://localhost:11434/v1` |
+| `ZAPCLAW_API_KEY` | API key (cloud mode) | — |
+| `ZAPCLAW_MODEL` | Model identifier | `phi3:mini` |
+| `ZAPCLAW_MAX_STEPS` | Max loop iterations | `15` |
+| `ZAPCLAW_TOOL_TIMEOUT` | Tool timeout (seconds) | `5` |
+| `ZAPCLAW_SANDBOXED` | Set to `1` when running inside sandbox (auto-set) | — |
+| `ZAPCLAW_INBOUND_KEY` | API key for remote inbound tunnel | — |
 
 ## Available Tools
 
@@ -180,7 +180,7 @@ Options:
 
 ## Sandbox
 
-Pincer **always** runs inside a bubblewrap (bwrap) sandbox by default. The binary self-wraps: on startup, if not already sandboxed, it re-execs itself inside bwrap with full namespace isolation.
+ZapClaw **always** runs inside a bubblewrap (bwrap) sandbox by default. The binary self-wraps: on startup, if not already sandboxed, it re-execs itself inside bwrap with full namespace isolation.
 
 **Sandbox properties:**
 - Read-only root filesystem
@@ -194,30 +194,30 @@ Network is enabled by default (needed for Ollama on localhost and cloud APIs). U
 
 ```bash
 # Normal usage — sandbox is automatic
-pincer --task "Calculate pi * e"
+zapclaw --task "Calculate pi * e"
 
 # Disable network inside sandbox
-pincer --sandbox-no-network --task "What is 2+2?"
+zapclaw --sandbox-no-network --task "What is 2+2?"
 
 # Skip sandbox (development only — NOT recommended)
-pincer --no-sandbox
+zapclaw --no-sandbox
 ```
 
 ## Remote Access
 
-Pincer can be accessed remotely from any machine (laptop, phone, tablet) over SSH. The inbound server is disabled by default and must be explicitly enabled.
+ZapClaw can be accessed remotely from any machine (laptop, phone, tablet) over SSH. The inbound server is disabled by default and must be explicitly enabled.
 
 ### 1. Start the Server
 
-On the machine running Pincer:
+On the machine running ZapClaw:
 
 ```bash
 # Generate a secure API key
-export PINCER_KEY="$(openssl rand -hex 16)"
-echo "Your API key: $PINCER_KEY"
+export ZAPCLAW_KEY="$(openssl rand -hex 16)"
+echo "Your API key: $ZAPCLAW_KEY"
 
-# Start Pincer with remote access
-pincer --enable-inbound --inbound-api-key "$PINCER_KEY"
+# Start ZapClaw with remote access
+zapclaw --enable-inbound --inbound-api-key "$ZAPCLAW_KEY"
 ```
 
 ### 2. Connect from Another Machine
@@ -229,26 +229,26 @@ On your laptop, phone (Termux), or any machine with SSH:
 ssh -L 9876:localhost:9876 user@my-server
 
 # Set up the client
-export PINCER_REMOTE_HOST="user@my-server"
-export PINCER_REMOTE_KEY="<your-key>"
+export ZAPCLAW_REMOTE_HOST="user@my-server"
+export ZAPCLAW_REMOTE_KEY="<your-key>"
 ```
 
-### 3. Use Pincer Remotely
+### 3. Use ZapClaw Remotely
 
 ```bash
 # Interactive terminal (multi-turn conversation)
-./scripts/pincer-remote.sh -i
+./scripts/zapclaw-remote.sh -i
 
 # One-shot task
-./scripts/pincer-remote.sh "What files changed today?"
+./scripts/zapclaw-remote.sh "What files changed today?"
 
 # File transfer
-./scripts/pincer-remote.sh --upload data.csv
-./scripts/pincer-remote.sh --download results.txt
-./scripts/pincer-remote.sh --list .csv
+./scripts/zapclaw-remote.sh --upload data.csv
+./scripts/zapclaw-remote.sh --download results.txt
+./scripts/zapclaw-remote.sh --list .csv
 
 # Health check
-./scripts/pincer-remote.sh --health
+./scripts/zapclaw-remote.sh --health
 ```
 
 ### Security

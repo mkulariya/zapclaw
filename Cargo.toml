@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "pincer-core",
-    "pincer-tools",
-    "pincer-cli",
-    "pincer-tunnels",
+    "zapclaw-core",
+    "zapclaw-tools",
+    "zapclaw-cli",
+    "zapclaw-tunnels",
 ]
 resolver = "2"
 
@@ -11,7 +11,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-authors = ["Pincer Contributors"]
+authors = ["ZapClaw Contributors"]
 description = "Secure, lightweight, high-performance AI agent"
 
 [workspace.dependencies]

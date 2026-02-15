@@ -1,8 +1,8 @@
-# Secure Remote Access for Pincer — Design & Implementation Plan
+# Secure Remote Access for ZapClaw — Design & Implementation Plan
 
 ## Context
 
-Pincer is a secure, lightweight agent running on a local machine. The user wants to interact with it remotely — send tasks, receive responses, transfer files — from another machine, mobile device, etc. OpenClaw solves this with WhatsApp/Telegram/Slack integrations, but those are bloated and insecure. We need the **simplest, most secure** approach using existing tools.
+ZapClaw is a secure, lightweight agent running on a local machine. The user wants to interact with it remotely — send tasks, receive responses, transfer files — from another machine, mobile device, etc. OpenClaw solves this with WhatsApp/Telegram/Slack integrations, but those are bloated and insecure. We need the **simplest, most secure** approach using existing tools.
 
 ---
 
@@ -11,7 +11,7 @@ Pincer is a secure, lightweight agent running on a local machine. The user wants
 ### Option A: SSH Tunnel + JSON-RPC (Recommended)
 
 ```
-[Mobile/Laptop] --SSH--> [Remote Machine] --localhost--> [Pincer Inbound:9876]
+[Mobile/Laptop] --SSH--> [Remote Machine] --localhost--> [ZapClaw Inbound:9876]
 ```
 
 - **Security**: SSH is the gold standard — battle-tested encryption, public key auth, no passwords
@@ -19,10 +19,10 @@ Pincer is a secure, lightweight agent running on a local machine. The user wants
 - **Mobile**: SSH apps exist for iOS (Blink, Termius) and Android (Termux, JuiceSSH)
 - **File transfer**: `scp`/SFTP built into SSH — no extra protocol needed
 - **How it works**:
-  1. Pincer runs with `--enable-inbound` (binds JSON-RPC to `127.0.0.1:9876`)
+  1. ZapClaw runs with `--enable-inbound` (binds JSON-RPC to `127.0.0.1:9876`)
   2. Remote user runs: `ssh -L 9876:localhost:9876 user@machine`
   3. Sends JSON-RPC requests to `localhost:9876` from their device
-  4. Files via `scp user@machine:~/pincer_workspace/file.txt .`
+  4. Files via `scp user@machine:~/zapclaw_workspace/file.txt .`
 - **Code needed**: Wire up existing inbound tunnel + add task processing + response mechanism
 - **New dependencies**: Zero
 
@@ -37,7 +37,7 @@ Pincer is a secure, lightweight agent running on a local machine. The user wants
 - **Mobile**: Tailscale has iOS/Android apps with built-in file sharing
 - **How it works**:
   1. Both devices join Tailscale network
-  2. Pincer binds inbound tunnel to Tailscale interface IP
+  2. ZapClaw binds inbound tunnel to Tailscale interface IP
   3. Remote device connects directly to `machine.tailnet:9876`
 - **Code needed**: Same as SSH + bind address config + optional Tailscale IP detection
 - **New dependencies**: Tailscale (external)
@@ -46,7 +46,7 @@ Pincer is a secure, lightweight agent running on a local machine. The user wants
 ### Option C: mTLS Direct Exposure
 
 ```
-[Client with cert] --mTLS HTTPS--> [Pincer:9876]
+[Client with cert] --mTLS HTTPS--> [ZapClaw:9876]
 ```
 
 - **Security**: Mutual TLS — both sides verify certificates
@@ -75,7 +75,7 @@ Pincer is a secure, lightweight agent running on a local machine. The user wants
 1. **Already installed** — zero setup on server side
 2. **Key-based auth** — no passwords, no tokens to manage
 3. **Encrypted tunnel** — all traffic encrypted end-to-end
-4. **Port forwarding** — Pincer stays on localhost, never exposed to network
+4. **Port forwarding** — ZapClaw stays on localhost, never exposed to network
 5. **File transfer** — scp/SFTP built-in, no extra protocol
 6. **Mobile** — SSH apps on every platform
 7. **Auditing** — SSH logs all connections
@@ -84,12 +84,12 @@ Tailscale is the recommended **upgrade path** for users who want easier mobile a
 
 ---
 
-## What Already Exists in Pincer
+## What Already Exists in ZapClaw
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| Inbound JSON-RPC server | Implemented, not wired up | `pincer-tunnels/src/inbound.rs` |
-| Outbound HTTPS proxy | Implemented, not wired up | `pincer-tunnels/src/outbound.rs` |
+| Inbound JSON-RPC server | Implemented, not wired up | `zapclaw-tunnels/src/inbound.rs` |
+| Outbound HTTPS proxy | Implemented, not wired up | `zapclaw-tunnels/src/outbound.rs` |
 | Bearer token auth | Implemented | `inbound.rs` |
 | Rate limiting | Implemented (outbound) | `outbound.rs` |
 | mTLS cert generation | Complete | `scripts/gen_certs.sh` |
@@ -105,13 +105,13 @@ Tailscale is the recommended **upgrade path** for users who want easier mobile a
 
 ### Phase 1: Wire Up Inbound Tunnel (core remote access)
 
-#### 1.1 Add CLI flags (`pincer-cli/src/main.rs`)
+#### 1.1 Add CLI flags (`zapclaw-cli/src/main.rs`)
 
 ```
 --enable-inbound          Enable remote JSON-RPC server
 --inbound-port <PORT>     Inbound server port [default: 9876]
 --inbound-bind <ADDR>     Bind address [default: 127.0.0.1]
---inbound-api-key <KEY>   API key for inbound auth [env: PINCER_INBOUND_KEY]
+--inbound-api-key <KEY>   API key for inbound auth [env: ZAPCLAW_INBOUND_KEY]
 ```
 
 #### 1.2 Start inbound server in REPL mode (`main.rs`)
@@ -196,8 +196,8 @@ Auto-detects and binds to Tailscale IP instead of localhost.
 
 **Server side:**
 ```bash
-# Start Pincer with remote access
-pincer --enable-inbound --inbound-api-key "my-secret-key"
+# Start ZapClaw with remote access
+zapclaw --enable-inbound --inbound-api-key "my-secret-key"
 ```
 
 **Client side (laptop/mobile):**
@@ -217,14 +217,14 @@ curl -X POST http://localhost:9876/rpc \
   -d '{"jsonrpc":"2.0","method":"upload_file","params":{"path":"data.csv","content_base64":"..."},"id":2}'
 
 # Transfer files directly
-scp user@my-server:~/pincer_workspace/output.txt .
+scp user@my-server:~/zapclaw_workspace/output.txt .
 ```
 
 ### Tailscale (Upgrade — Easier Mobile)
 
 ```bash
 # Server: bind to Tailscale interface
-pincer --enable-inbound --inbound-bind tailscale --inbound-api-key "my-key"
+zapclaw --enable-inbound --inbound-bind tailscale --inbound-api-key "my-key"
 
 # Client: connect directly via Tailscale network
 curl http://my-server.tailnet:9876/rpc ...
@@ -249,9 +249,9 @@ curl http://my-server.tailnet:9876/rpc ...
 
 | File | Changes |
 |------|---------|
-| `pincer-cli/src/main.rs` | Add CLI flags, start inbound server, task processing loop |
-| `pincer-tunnels/src/inbound.rs` | Add `run_task`, `upload_file`, `download_file`, `list_files` methods |
-| `pincer-core/src/config.rs` | Add env vars for inbound config |
+| `zapclaw-cli/src/main.rs` | Add CLI flags, start inbound server, task processing loop |
+| `zapclaw-tunnels/src/inbound.rs` | Add `run_task`, `upload_file`, `download_file`, `list_files` methods |
+| `zapclaw-core/src/config.rs` | Add env vars for inbound config |
 | `README.md` | Add remote access documentation |
 
 ---
@@ -263,7 +263,7 @@ curl http://my-server.tailnet:9876/rpc ...
 cargo build
 
 # Test 1: Start with inbound enabled
-pincer --enable-inbound --inbound-api-key test123 &
+zapclaw --enable-inbound --inbound-api-key test123 &
 
 # Test 2: Health check
 curl -s http://localhost:9876/rpc \

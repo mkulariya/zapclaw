@@ -1,0 +1,27 @@
+[package]
+name = "zapclaw-tunnels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Secure tunnel implementations for ZapClaw (outbound HTTPS, inbound VPN+RPC)"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+zapclaw-core = { path = "../zapclaw-core" }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+url = "2"
+base64 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

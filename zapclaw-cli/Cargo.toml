@@ -1,0 +1,25 @@
+[package]
+name = "zapclaw-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI interface for ZapClaw agent"
+
+[[bin]]
+name = "zapclaw"
+path = "src/main.rs"
+
+[dependencies]
+zapclaw-core = { path = "../zapclaw-core" }
+zapclaw-tools = { path = "../zapclaw-tools" }
+zapclaw-tunnels = { path = "../zapclaw-tunnels" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+rustyline = "14"
+uuid = { workspace = true }
+reqwest = { workspace = true }
