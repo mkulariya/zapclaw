@@ -8,6 +8,7 @@ use pincer_core::memory::MemoryDb;
 use pincer_core::session::SessionStore;
 use pincer_core::StreamChunk;
 use tokio::sync::mpsc;
+use pincer_tunnels::inbound::{InboundConfig, InboundMessage, InboundResponse, InboundTunnel};
 use pincer_tools::browser_tool::BrowserTool;
 use pincer_tools::cron_tool::{check_due_jobs, CronTool};
 use pincer_tools::edit_tool::EditTool;
@@ -76,6 +77,22 @@ struct Cli {
     /// Tool execution timeout in seconds
     #[arg(long, default_value = "30")]
     tool_timeout: u64,
+
+    /// Enable remote JSON-RPC server for inbound task submission
+    #[arg(long)]
+    enable_inbound: bool,
+
+    /// Inbound server port
+    #[arg(long, default_value = "9876")]
+    inbound_port: u16,
+
+    /// Inbound server bind address
+    #[arg(long, default_value = "127.0.0.1")]
+    inbound_bind: String,
+
+    /// API key for inbound tunnel auth
+    #[arg(long, env = "PINCER_INBOUND_KEY")]
+    inbound_api_key: Option<String>,
 
     /// Self-update from GitHub releases
     #[arg(long)]
@@ -380,7 +397,7 @@ async fn main() -> Result<()> {
     println!();
 
     let sandbox_active = sandbox_state == pincer_core::sandbox::SandboxState::Active;
-    let agent = Agent::new(llm, memory.clone(), tools, config, sandbox_active);
+    let agent = Arc::new(Agent::new(llm, memory.clone(), tools, config, sandbox_active));
 
     let session_store = SessionStore::new(&workspace);
     let mut session_id = uuid::Uuid::new_v4().to_string();
@@ -392,8 +409,48 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Shared shutdown channel for background loops
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Start inbound tunnel if enabled
+    let _inbound_handle = if cli.enable_inbound {
+        let api_key = cli.inbound_api_key
+            .ok_or_else(|| anyhow::anyhow!(
+                "--inbound-api-key is required when --enable-inbound is set.\n\
+                 Generate one: openssl rand -hex 16"
+            ))?;
+
+        let inbound_config = InboundConfig {
+            enabled: true,
+            bind_address: cli.inbound_bind.clone(),
+            rpc_port: cli.inbound_port,
+            api_key: Some(api_key),
+            max_concurrent: 5,
+            workspace_root: Some(workspace.clone()),
+        };
+
+        let (tunnel, inbound_rx) = InboundTunnel::new(inbound_config);
+        let tunnel = Arc::new(tunnel);
+        let tunnel_handle = tunnel.start().await
+            .context("Failed to start inbound tunnel")?;
+
+        // Spawn the processing loop
+        let inbound_agent = agent.clone();
+        let inbound_shutdown = shutdown_rx.clone();
+        let processing_handle = tokio::spawn(async move {
+            inbound_processing_loop(inbound_agent, inbound_rx, inbound_shutdown).await;
+        });
+
+        println!("  Inbound:    {}:{} (remote access enabled)", cli.inbound_bind, cli.inbound_port);
+        println!();
+
+        Some((tunnel_handle, processing_handle))
+    } else {
+        None
+    };
+
     // Start cron background loop — only in REPL mode
-    let (cron_shutdown_tx, cron_shutdown_rx) = tokio::sync::watch::channel(false);
+    let cron_shutdown_rx = shutdown_rx.clone();
     let cron_workspace = workspace.clone();
     let cron_handle = tokio::spawn(async move {
         cron_background_loop(&cron_workspace, cron_shutdown_rx).await;
@@ -554,14 +611,58 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Graceful shutdown: stop cron background loop and wait for it to finish
-    let _ = cron_shutdown_tx.send(true);
+    // Graceful shutdown: stop all background loops
+    let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         cron_handle,
     ).await;
 
     Ok(())
+}
+
+/// Inbound tunnel processing loop — receives tasks from remote clients,
+/// runs them through the agent, and sends responses back.
+async fn inbound_processing_loop(
+    agent: Arc<Agent>,
+    mut rx: mpsc::Receiver<InboundMessage>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Some(msg) => {
+                        let agent = agent.clone();
+                        tokio::spawn(async move {
+                            let session_id = msg.task.session_id
+                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+                            log::info!("Processing inbound task {} for session {}", msg.task.id, session_id);
+
+                            let result = agent.run(&session_id, &msg.task.task).await;
+
+                            if let Some(tx) = msg.response_tx {
+                                let response = match result {
+                                    Ok(text) => InboundResponse {
+                                        response: text,
+                                        session_id,
+                                    },
+                                    Err(e) => InboundResponse {
+                                        response: format!("Error: {}", e),
+                                        session_id,
+                                    },
+                                };
+                                let _ = tx.send(response);
+                            }
+                        });
+                    }
+                    None => break, // Channel closed
+                }
+            }
+            _ = shutdown.changed() => break,
+        }
+    }
 }
 
 /// Cron background check loop — lightweight, runs every 30s.

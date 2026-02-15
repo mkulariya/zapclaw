@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 pincer-core = { path = "../pincer-core" }
 pincer-tools = { path = "../pincer-tools" }
+pincer-tunnels = { path = "../pincer-tunnels" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -103,6 +103,7 @@ pincer/
 │   ├── outbound.rs        # HTTPS proxy (mTLS, rate limiting)
 │   └── inbound.rs         # JSON-RPC 2.0 server
 └── scripts/
+    ├── pincer-remote.sh   # Remote client (SSH tunnel + JSON-RPC)
     ├── sandbox.sh         # Deprecated — sandbox is now built-in
     └── gen_certs.sh       # mTLS certificate generator
 ```
@@ -147,6 +148,10 @@ Options:
       --no-confirm           Disable confirmation prompts
       --no-sandbox           Skip bubblewrap sandbox (dev only)
       --sandbox-no-network   Disable network inside sandbox
+      --enable-inbound       Enable remote JSON-RPC server
+      --inbound-port <PORT>  Inbound server port [default: 9876]
+      --inbound-bind <ADDR>  Bind address [default: 127.0.0.1]
+      --inbound-api-key <KEY> API key for remote auth [env: PINCER_INBOUND_KEY]
   -h, --help                 Print help
   -V, --version              Print version
 ```
@@ -163,6 +168,7 @@ Options:
 | `PINCER_MAX_STEPS` | Max loop iterations | `15` |
 | `PINCER_TOOL_TIMEOUT` | Tool timeout (seconds) | `5` |
 | `PINCER_SANDBOXED` | Set to `1` when running inside sandbox (auto-set) | — |
+| `PINCER_INBOUND_KEY` | API key for remote inbound tunnel | — |
 
 ## Available Tools
 
@@ -197,7 +203,62 @@ pincer --sandbox-no-network --task "What is 2+2?"
 pincer --no-sandbox
 ```
 
-If bubblewrap is not installed, Pincer prints a warning and runs without sandbox (degraded security).
+## Remote Access
+
+Pincer can be accessed remotely from any machine (laptop, phone, tablet) over SSH. The inbound server is disabled by default and must be explicitly enabled.
+
+### 1. Start the Server
+
+On the machine running Pincer:
+
+```bash
+# Generate a secure API key
+export PINCER_KEY="$(openssl rand -hex 16)"
+echo "Your API key: $PINCER_KEY"
+
+# Start Pincer with remote access
+pincer --enable-inbound --inbound-api-key "$PINCER_KEY"
+```
+
+### 2. Connect from Another Machine
+
+On your laptop, phone (Termux), or any machine with SSH:
+
+```bash
+# Open SSH tunnel to the server
+ssh -L 9876:localhost:9876 user@my-server
+
+# Set up the client
+export PINCER_REMOTE_HOST="user@my-server"
+export PINCER_REMOTE_KEY="<your-key>"
+```
+
+### 3. Use Pincer Remotely
+
+```bash
+# Interactive terminal (multi-turn conversation)
+./scripts/pincer-remote.sh -i
+
+# One-shot task
+./scripts/pincer-remote.sh "What files changed today?"
+
+# File transfer
+./scripts/pincer-remote.sh --upload data.csv
+./scripts/pincer-remote.sh --download results.txt
+./scripts/pincer-remote.sh --list .csv
+
+# Health check
+./scripts/pincer-remote.sh --health
+```
+
+### Security
+
+- Server binds to `127.0.0.1` only — never exposed to the network directly
+- API key required on every request
+- All inbound tasks pass through the input sanitizer
+- File operations confined to workspace via Confiner
+- Transport encrypted via SSH tunnel
+- Agent still runs inside bubblewrap sandbox
 
 ## Testing
 

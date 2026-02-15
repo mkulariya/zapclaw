@@ -305,13 +305,20 @@ impl Agent {
             }
         }
 
+        // Load previous conversation history (before appending current message)
+        let previous_messages = if let Some(ref store) = self.session_store {
+            store.load_session_messages(session_id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         // Log to audit trail
         self.memory.log_action("task_start", Some(&sanitized_task), None)?;
 
         // 2. Store user message in memory
         self.memory.store(session_id, "user", &sanitized_task)?;
 
-        // 3. Build initial messages with system prompt + user message
+        // 3. Build messages: system prompt + previous history + current user message
         let system_prompt = self.build_system_prompt();
         let user_msg = ChatMessage {
             role: "user".to_string(),
@@ -332,8 +339,9 @@ impl Agent {
                 tool_call_id: None,
                 tool_calls: None,
             },
-            user_msg,
         ];
+        messages.extend(previous_messages);
+        messages.push(user_msg);
 
         // 4. Agent loop: observe-plan-act-reflect
         let tool_defs = self.tools.definitions();
@@ -475,6 +483,13 @@ impl Agent {
             }
         }
 
+        // Load previous conversation history (before appending current message)
+        let previous_messages = if let Some(ref store) = self.session_store {
+            store.load_session_messages(session_id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         // Emit lifecycle start
         let _ = tx.send(StreamChunk::LifecycleEvent { phase: "start".to_string() }).await;
 
@@ -484,7 +499,7 @@ impl Agent {
         // 2. Store user message in memory
         self.memory.store(session_id, "user", &sanitized_task)?;
 
-        // 3. Build initial messages with system prompt + user message
+        // 3. Build messages: system prompt + previous history + current user message
         let system_prompt = self.build_system_prompt();
         let user_msg = ChatMessage {
             role: "user".to_string(),
@@ -505,8 +520,9 @@ impl Agent {
                 tool_call_id: None,
                 tool_calls: None,
             },
-            user_msg,
         ];
+        messages.extend(previous_messages);
+        messages.push(user_msg);
 
         // 4. Agent loop: observe-plan-act-reflect (streaming version)
         let tool_defs = self.tools.definitions();

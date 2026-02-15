@@ -1459,11 +1459,13 @@ name = "pincer-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "env_logger",
  "log",
  "pincer-core",
  "pincer-tools",
+ "pincer-tunnels",
  "reqwest",
  "rustyline",
  "serde",
@@ -1526,6 +1528,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
  "http-body-util",
