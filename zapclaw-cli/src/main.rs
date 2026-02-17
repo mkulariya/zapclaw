@@ -290,7 +290,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Sandbox enforcement — must happen FIRST, before any other initialization.
-    // If not already sandboxed and --no-sandbox is not set, re-exec inside bwrap.
+    //
+    // IMPORTANT: ensure_sandboxed() now implements FAIL-CLOSED behavior:
+    // - If sandbox is verified (env + runtime evidence), returns Active
+    // - If not verified but bwrap available, re-execs into sandbox (does NOT return)
+    // - If not verified AND bwrap missing, returns HARD ERROR (fails closed)
+    //
+    // The --no-sandbox flag bypasses this and returns Disabled explicitly.
     let sandbox_state = if cli.no_sandbox {
         zapclaw_core::sandbox::SandboxState::Disabled
     } else {
@@ -299,7 +305,7 @@ async fn main() -> Result<()> {
         zapclaw_core::sandbox::ensure_sandboxed(&ws_path, cli.sandbox_no_network)?
         // NOTE: If bwrap is available, ensure_sandboxed() does NOT return —
         // it replaces this process via exec(). If we reach here, we're
-        // either already inside the sandbox (Active) or bwrap is missing (Unavailable).
+        // verified as sandboxed (Active).
     };
 
     // Self-update mode
@@ -344,9 +350,8 @@ async fn main() -> Result<()> {
     println!("  Timeout:    {}s", config.tool_timeout_secs);
     println!("  Confirm:    {}", if config.require_confirmation { "yes" } else { "no" });
     println!("  Sandbox:    {}", match sandbox_state {
-        zapclaw_core::sandbox::SandboxState::Active => "active (bubblewrap)",
-        zapclaw_core::sandbox::SandboxState::Disabled => "DISABLED (--no-sandbox)",
-        zapclaw_core::sandbox::SandboxState::Unavailable => "UNAVAILABLE (install bwrap)",
+        zapclaw_core::sandbox::SandboxState::Active => "active (bubblewrap, verified)",
+        zapclaw_core::sandbox::SandboxState::Disabled => "DISABLED (--no-sandbox, UNSAFE)",
     });
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
