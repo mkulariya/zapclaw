@@ -58,14 +58,22 @@ That's it. Now `zapclaw` is available as a command from anywhere. It automatical
 ### Run
 
 ```bash
-# Interactive REPL
-zapclaw
+# Interactive REPL (requires explicit endpoint configuration)
+zapclaw --api-url http://localhost:11434/v1 --model-name phi3:mini
 
 # Single task
-zapclaw --task "What is sqrt(144) + 3^2?"
+zapclaw --api-url http://localhost:11434/v1 --model-name phi3:mini --task "What is sqrt(144) + 3^2?"
 
-# Cloud LLM mode (no Ollama needed)
-ZAPCLAW_API_KEY="sk-your-key" zapclaw --model-mode cloud --model-name gpt-4o
+# Using environment variables
+export ZAPCLAW_API_BASE_URL="http://localhost:11434/v1"
+export ZAPCLAW_MODEL="phi3:mini"
+zapclaw
+
+# Cloud LLM (e.g., OpenAI)
+export ZAPCLAW_API_BASE_URL="https://api.openai.com/v1"
+export ZAPCLAW_API_KEY="sk-your-key"
+export ZAPCLAW_MODEL="gpt-4o"
+zapclaw
 ```
 
 ### REPL Commands
@@ -139,10 +147,9 @@ Usage: zapclaw [OPTIONS]
 
 Options:
   -w, --workspace <DIR>      Workspace directory [default: ./zapclaw_workspace]
-  -m, --model-mode <MODE>    LLM mode: "local" or "cloud" [default: local]
-  -n, --model-name <NAME>    Model name [default: phi3:mini]
-      --api-url <URL>        API base URL
-      --api-key <KEY>        API key [env: ZAPCLAW_API_KEY]
+  -n, --model-name <NAME>    Model name [env: ZAPCLAW_MODEL] (required)
+      --api-url <URL>        API base URL [env: ZAPCLAW_API_BASE_URL] (required)
+      --api-key <KEY>        API key [env: ZAPCLAW_API_KEY] (required for remote endpoints)
       --max-steps <N>        Max agent steps per task [default: 15]
   -t, --task <TASK>          Run single task and exit
       --no-confirm           Disable confirmation prompts
@@ -156,19 +163,25 @@ Options:
   -V, --version              Print version
 ```
 
+**Important:** ZapClaw requires explicit endpoint configuration. You must specify:
+- `--api-url` (or `ZAPCLAW_API_BASE_URL` env var): The LLM API endpoint
+- `--model-name` (or `ZAPCLAW_MODEL` env var): The model identifier
+- `--api-key` (or `ZAPCLAW_API_KEY` env var): Required only for non-localhost endpoints
+
 ## Environment Variables
 
 | Variable | Description | Default |
 |---|---|---|
 | `ZAPCLAW_WORKSPACE` | Workspace directory | `./zapclaw_workspace` |
-| `ZAPCLAW_LLM_MODE` | `local` or `cloud` | `local` |
-| `ZAPCLAW_API_BASE_URL` | LLM API endpoint | `http://localhost:11434/v1` |
-| `ZAPCLAW_API_KEY` | API key (cloud mode) | — |
-| `ZAPCLAW_MODEL` | Model identifier | `phi3:mini` |
+| `ZAPCLAW_API_BASE_URL` | LLM API endpoint (required) | — |
+| `ZAPCLAW_MODEL` | Model identifier (required) | — |
+| `ZAPCLAW_API_KEY` | API key (required for remote endpoints) | — |
 | `ZAPCLAW_MAX_STEPS` | Max loop iterations | `15` |
 | `ZAPCLAW_TOOL_TIMEOUT` | Tool timeout (seconds) | `5` |
 | `ZAPCLAW_SANDBOXED` | Set to `1` when running inside sandbox (auto-set) | — |
 | `ZAPCLAW_INBOUND_KEY` | API key for remote inbound tunnel | — |
+
+**Note:** API key is optional only for loopback endpoints (localhost, 127.0.0.1, ::1). All other endpoints require an API key.
 
 ## Available Tools
 

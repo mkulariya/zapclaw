@@ -10,15 +10,12 @@ pub struct Config {
     /// Path to the confined workspace directory (default: ./zapclaw_workspace)
     pub workspace_path: PathBuf,
 
-    /// LLM backend mode
-    pub llm_mode: LlmMode,
-
     /// Base URL for the LLM API
-    /// - Local (Ollama): http://localhost:11434/v1
-    /// - Cloud (OpenAI): https://api.openai.com/v1
+    /// Must be explicitly provided via --api-url or ZAPCLAW_API_BASE_URL
     pub api_base_url: String,
 
     /// Model identifier (e.g., "phi3:mini" for Ollama, "gpt-4o" for OpenAI)
+    /// Must be explicitly provided via --model-name or ZAPCLAW_MODEL
     pub model_name: String,
 
     /// Maximum steps per agent loop (prevents infinite runs)
@@ -43,21 +40,12 @@ pub struct Config {
     pub context_window_tokens: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum LlmMode {
-    /// Local inference via Ollama (default)
-    Local,
-    /// Cloud inference via OpenAI-compatible API
-    Cloud,
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
             workspace_path: PathBuf::from("./zapclaw_workspace"),
-            llm_mode: LlmMode::Local,
-            api_base_url: "http://localhost:11434/v1".to_string(),
-            model_name: "phi3:mini".to_string(),
+            api_base_url: String::new(), // Must be explicitly provided
+            model_name: String::new(),   // Must be explicitly provided
             max_steps: 15,
             enable_outbound: false,
             enable_inbound: false,
@@ -70,14 +58,13 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from environment variables, falling back to defaults.
+    /// Load configuration from environment variables.
     ///
     /// Supported env vars:
     /// - ZAPCLAW_WORKSPACE: workspace directory path
-    /// - ZAPCLAW_LLM_MODE: "local" or "cloud"
-    /// - ZAPCLAW_API_BASE_URL: LLM API base URL
+    /// - ZAPCLAW_API_BASE_URL: LLM API base URL (required)
     /// - ZAPCLAW_API_KEY: API key (read at runtime, never stored)
-    /// - ZAPCLAW_MODEL: model name
+    /// - ZAPCLAW_MODEL: model name (required)
     /// - ZAPCLAW_MAX_STEPS: max agent loop steps
     /// - ZAPCLAW_TOOL_TIMEOUT: tool timeout in seconds
     /// - ZAPCLAW_REQUIRE_CONFIRMATION: "true" or "false"
@@ -88,17 +75,9 @@ impl Config {
             config.workspace_path = PathBuf::from(ws);
         }
 
-        if let Ok(mode) = std::env::var("ZAPCLAW_LLM_MODE") {
-            config.llm_mode = match mode.to_lowercase().as_str() {
-                "cloud" => LlmMode::Cloud,
-                _ => LlmMode::Local,
-            };
-        }
-
+        // These are now required but loaded here - validation happens in CLI
         if let Ok(url) = std::env::var("ZAPCLAW_API_BASE_URL") {
             config.api_base_url = url;
-        } else if config.llm_mode == LlmMode::Cloud {
-            config.api_base_url = "https://api.openai.com/v1".to_string();
         }
 
         if let Ok(model) = std::env::var("ZAPCLAW_MODEL") {
@@ -171,9 +150,9 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.llm_mode, LlmMode::Local);
-        assert_eq!(config.api_base_url, "http://localhost:11434/v1");
-        assert_eq!(config.model_name, "phi3:mini");
+        // api_base_url and model_name are now empty by default (must be explicitly provided)
+        assert!(config.api_base_url.is_empty());
+        assert!(config.model_name.is_empty());
         assert_eq!(config.max_steps, 15);
         assert!(!config.enable_outbound);
         assert!(!config.enable_inbound);

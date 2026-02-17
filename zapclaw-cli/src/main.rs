@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use zapclaw_core::agent::{Agent, ConfirmationMode, ToolRegistry};
-use zapclaw_core::config::{Config, LlmMode};
+use zapclaw_core::config::Config;
 use zapclaw_core::confiner::Confiner;
 use zapclaw_core::llm::OpenAiCompatibleClient;
 use zapclaw_core::memory::MemoryDb;
@@ -35,19 +35,15 @@ struct Cli {
     #[arg(short, long, default_value = "./zapclaw_workspace")]
     workspace: String,
 
-    /// LLM mode: "local" (Ollama) or "cloud" (OpenAI-compatible)
-    #[arg(short, long, default_value = "local")]
-    model_mode: String,
-
     /// Model name (e.g., "phi3:mini" for Ollama, "gpt-4o" for OpenAI)
-    #[arg(short = 'n', long, default_value = "phi3:mini")]
-    model_name: String,
+    #[arg(short = 'n', long, env = "ZAPCLAW_MODEL")]
+    model_name: Option<String>,
 
-    /// API base URL (default: auto-detected from mode)
-    #[arg(long)]
+    /// API base URL (required)
+    #[arg(long, env = "ZAPCLAW_API_BASE_URL")]
     api_url: Option<String>,
 
-    /// API key (prefer ZAPCLAW_API_KEY env var for security)
+    /// API key (optional for loopback endpoints, required for remote endpoints)
     #[arg(long, env = "ZAPCLAW_API_KEY")]
     api_key: Option<String>,
 
@@ -102,6 +98,132 @@ struct Cli {
     /// Self-update from GitHub releases
     #[arg(long)]
     update: bool,
+}
+
+/// Resolved LLM settings with validation
+#[derive(Debug, Clone)]
+struct ResolvedLlmSettings {
+    api_base_url: String,
+    model_name: String,
+    api_key: Option<String>,
+    endpoint_kind: EndpointKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EndpointKind {
+    Loopback,
+    Remote,
+}
+
+/// Check if a URL host is strict loopback (localhost, 127.0.0.1, ::1)
+/// Uses case-insensitive matching for hostname and IP-based detection for robustness.
+fn is_strict_loopback(host: &str) -> bool {
+    let host_lower = host.to_lowercase();
+
+    // Check for localhost hostname (case-insensitive)
+    if host_lower == "localhost" {
+        return true;
+    }
+
+    // Try to parse as IP address for robust loopback detection
+    if let Ok(addr) = host_lower.parse::<std::net::IpAddr>() {
+        return addr.is_loopback();
+    }
+
+    false
+}
+
+/// Resolve and validate LLM settings from CLI/env inputs
+fn resolve_llm_settings(cli: &Cli) -> Result<ResolvedLlmSettings> {
+    // Resolve api_base_url from CLI or env
+    let api_base_url = cli
+        .api_url
+        .clone()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "⛔ Missing required field: --api-url (or ZAPCLAW_API_BASE_URL env var)\n\
+                 \n\
+                 ZapClaw requires an explicit LLM endpoint URL. Examples:\n\
+                 • Ollama (local): --api-url http://localhost:11434/v1\n\
+                 • OpenAI (cloud): --api-url https://api.openai.com/v1\n\
+                 • Custom: --api-url http://your-host:port/v1"
+            )
+        })?;
+
+    // Validate URL format
+    let parsed_url: url::Url = api_base_url.parse().context("Invalid --api-url format")?;
+
+    // Validate scheme
+    if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
+        bail!(
+            "⛔ Invalid --api-url scheme: '{}'. Only http and https are supported.\n\
+             You provided: {}",
+            parsed_url.scheme(),
+            api_base_url
+        );
+    }
+
+    // Validate host exists
+    let host = parsed_url
+        .host_str()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "⛔ Invalid --api-url: missing host. You provided: {}",
+                api_base_url
+            )
+        })?;
+
+    // Resolve model_name from CLI or env
+    let model_name = cli
+        .model_name
+        .clone()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "⛔ Missing required field: --model-name (or ZAPCLAW_MODEL env var)\n\
+                 \n\
+                 ZapClaw requires an explicit model identifier. Examples:\n\
+                 • Ollama: --model-name phi3:mini\n\
+                 • OpenAI: --model-name gpt-4o\n\
+                 • Custom: --model-name your-model-name"
+            )
+        })?
+        .trim()
+        .to_string();
+
+    // Validate model_name is not empty
+    if model_name.is_empty() {
+        bail!("⛔ --model-name cannot be empty");
+    }
+
+    // Determine endpoint kind
+    let endpoint_kind = if is_strict_loopback(host) {
+        EndpointKind::Loopback
+    } else {
+        EndpointKind::Remote
+    };
+
+    // Resolve api_key from CLI or env
+    let api_key = cli.api_key.clone().or_else(|| std::env::var("ZAPCLAW_API_KEY").ok());
+
+    // Validate api_key requirement for remote endpoints
+    if endpoint_kind == EndpointKind::Remote && api_key.is_none() {
+        bail!(
+            "⛔ API key is required for remote endpoints.\n\
+             \n\
+             Your endpoint ({}) is not localhost. Remote endpoints require authentication.\n\
+             \n\
+             Fix: Set --api-key (or ZAPCLAW_API_KEY env var).\n\
+             Example: --api-key sk-your-api-key-here",
+            host
+        );
+    }
+
+    Ok(ResolvedLlmSettings {
+        api_base_url,
+        model_name,
+        api_key,
+        endpoint_kind,
+    })
 }
 
 /// Resolve confirmation policy from runtime mode + terminal capabilities.
@@ -317,25 +439,18 @@ async fn main() -> Result<()> {
         return self_update().await;
     }
 
+    // Resolve and validate LLM settings (fail fast on missing/invalid config)
+    let llm_settings = resolve_llm_settings(&cli)?;
+
     // Build configuration
     let mut config = Config::from_env();
     config.workspace_path = cli.workspace.into();
-    config.model_name = resolve_model_alias(&cli.model_name);
+    config.model_name = resolve_model_alias(&llm_settings.model_name);
+    config.api_base_url = llm_settings.api_base_url.clone();
     config.max_steps = cli.max_steps;
     config.require_confirmation = !cli.no_confirm;
     config.enable_egress_guard = !cli.no_egress_guard;
     config.tool_timeout_secs = cli.tool_timeout;
-
-    config.llm_mode = match cli.model_mode.to_lowercase().as_str() {
-        "cloud" => LlmMode::Cloud,
-        _ => LlmMode::Local,
-    };
-
-    if let Some(url) = cli.api_url {
-        config.api_base_url = url;
-    } else if config.llm_mode == LlmMode::Cloud {
-        config.api_base_url = "https://api.openai.com/v1".to_string();
-    }
 
     // Resolve workspace
     let workspace = config.resolve_workspace()
@@ -347,10 +462,14 @@ async fn main() -> Result<()> {
     println!("🦞 ZapClaw v{}", env!("CARGO_PKG_VERSION"));
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  Workspace:  {}", workspace.display());
-    println!("  Model:      {} ({})", config.model_name, match config.llm_mode {
-        LlmMode::Local => "Ollama local",
-        LlmMode::Cloud => "Cloud API",
-    });
+    println!("  Model:      {}", config.model_name);
+    println!("  Endpoint:   {} ({})",
+        llm_settings.api_base_url,
+        match llm_settings.endpoint_kind {
+            EndpointKind::Loopback => "loopback, api-key optional",
+            EndpointKind::Remote => "remote, api-key required",
+        }
+    );
     println!("  Max steps:  {}", config.max_steps);
     println!("  Timeout:    {}s", config.tool_timeout_secs);
     println!("  Confirm:    {}", if config.require_confirmation { "yes" } else { "no" });
@@ -362,7 +481,7 @@ async fn main() -> Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // Initialize components
-    let api_key = cli.api_key.or_else(Config::api_key);
+    let api_key = llm_settings.api_key;
 
     let llm: Arc<dyn zapclaw_core::llm::LlmClient> = Arc::new(
         OpenAiCompatibleClient::new(&config.api_base_url, &config.model_name, api_key.clone())
@@ -692,6 +811,275 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_strict_loopback() {
+        // Case-insensitive hostname
+        assert!(is_strict_loopback("localhost"));
+        assert!(is_strict_loopback("LOCALHOST"));
+        assert!(is_strict_loopback("LocalHost"));
+
+        // IPv4 loopback
+        assert!(is_strict_loopback("127.0.0.1"));
+        assert!(is_strict_loopback("127.0.0.2"));
+        assert!(is_strict_loopback("127.1.1.1"));
+
+        // IPv6 loopback
+        assert!(is_strict_loopback("::1"));
+        assert!(is_strict_loopback("0:0:0:0:0:0:0:1"));
+
+        // NOT loopback
+        assert!(!is_strict_loopback("example.com"));
+        assert!(!is_strict_loopback("192.168.1.1"));
+        assert!(!is_strict_loopback("api.openai.com"));
+        assert!(!is_strict_loopback("10.0.0.1"));
+        assert!(!is_strict_loopback("172.16.0.1"));
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_missing_api_url() {
+        let cli = Cli {
+            workspace: "./test_workspace".to_string(),
+            model_name: Some("phi3:mini".to_string()),
+            api_url: None,
+            api_key: None,
+            search_api_key: None,
+            max_steps: 15,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: 30,
+            enable_inbound: false,
+            inbound_port: 9876,
+            inbound_bind: "127.0.0.1".to_string(),
+            inbound_api_key: None,
+            update: false,
+        };
+
+        let result = resolve_llm_settings(&cli);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Missing required field: --api-url"));
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_missing_model_name() {
+        let cli = Cli {
+            workspace: "./test_workspace".to_string(),
+            model_name: None,
+            api_url: Some("http://localhost:11434/v1".to_string()),
+            api_key: None,
+            search_api_key: None,
+            max_steps: 15,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: 30,
+            enable_inbound: false,
+            inbound_port: 9876,
+            inbound_bind: "127.0.0.1".to_string(),
+            inbound_api_key: None,
+            update: false,
+        };
+
+        let result = resolve_llm_settings(&cli);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Missing required field: --model-name"));
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_invalid_scheme() {
+        let cli = Cli {
+            workspace: "./test_workspace".to_string(),
+            model_name: Some("phi3:mini".to_string()),
+            api_url: Some("ftp://localhost:11434/v1".to_string()),
+            api_key: None,
+            search_api_key: None,
+            max_steps: 15,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: 30,
+            enable_inbound: false,
+            inbound_port: 9876,
+            inbound_bind: "127.0.0.1".to_string(),
+            inbound_api_key: None,
+            update: false,
+        };
+
+        let result = resolve_llm_settings(&cli);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid --api-url scheme"));
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_missing_host() {
+        // Use an invalid URL format that will fail to parse
+        let cli = Cli {
+            workspace: "./test_workspace".to_string(),
+            model_name: Some("phi3:mini".to_string()),
+            api_url: Some("not-a-url".to_string()),
+            api_key: None,
+            search_api_key: None,
+            max_steps: 15,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: 30,
+            enable_inbound: false,
+            inbound_port: 9876,
+            inbound_bind: "127.0.0.1".to_string(),
+            inbound_api_key: None,
+            update: false,
+        };
+
+        let result = resolve_llm_settings(&cli);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid --api-url") || err.contains("format"));
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_loopback_without_key() {
+        let cli = Cli {
+            workspace: "./test_workspace".to_string(),
+            model_name: Some("phi3:mini".to_string()),
+            api_url: Some("http://localhost:11434/v1".to_string()),
+            api_key: None,
+            search_api_key: None,
+            max_steps: 15,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: 30,
+            enable_inbound: false,
+            inbound_port: 9876,
+            inbound_bind: "127.0.0.1".to_string(),
+            inbound_api_key: None,
+            update: false,
+        };
+
+        let result = resolve_llm_settings(&cli);
+        assert!(result.is_ok());
+        let settings = result.unwrap();
+        assert_eq!(settings.endpoint_kind, EndpointKind::Loopback);
+        assert!(settings.api_key.is_none());
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_remote_without_key() {
+        let cli = Cli {
+            workspace: "./test_workspace".to_string(),
+            model_name: Some("gpt-4o".to_string()),
+            api_url: Some("https://api.openai.com/v1".to_string()),
+            api_key: None,
+            search_api_key: None,
+            max_steps: 15,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: 30,
+            enable_inbound: false,
+            inbound_port: 9876,
+            inbound_bind: "127.0.0.1".to_string(),
+            inbound_api_key: None,
+            update: false,
+        };
+
+        let result = resolve_llm_settings(&cli);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("API key is required for remote endpoints"));
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_remote_with_key() {
+        let cli = Cli {
+            workspace: "./test_workspace".to_string(),
+            model_name: Some("gpt-4o".to_string()),
+            api_url: Some("https://api.openai.com/v1".to_string()),
+            api_key: Some("sk-test-key".to_string()),
+            search_api_key: None,
+            max_steps: 15,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: 30,
+            enable_inbound: false,
+            inbound_port: 9876,
+            inbound_bind: "127.0.0.1".to_string(),
+            inbound_api_key: None,
+            update: false,
+        };
+
+        let result = resolve_llm_settings(&cli);
+        assert!(result.is_ok());
+        let settings = result.unwrap();
+        assert_eq!(settings.endpoint_kind, EndpointKind::Remote);
+        assert_eq!(settings.api_key, Some("sk-test-key".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_empty_model_name() {
+        let cli = Cli {
+            workspace: "./test_workspace".to_string(),
+            model_name: Some("   ".to_string()),
+            api_url: Some("http://localhost:11434/v1".to_string()),
+            api_key: None,
+            search_api_key: None,
+            max_steps: 15,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: 30,
+            enable_inbound: false,
+            inbound_port: 9876,
+            inbound_bind: "127.0.0.1".to_string(),
+            inbound_api_key: None,
+            update: false,
+        };
+
+        let result = resolve_llm_settings(&cli);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("--model-name cannot be empty"));
+    }
+
+    #[test]
+    fn test_cli_parser_rejects_model_mode() {
+        // Test that --model-mode is not recognized (clap default behavior)
+        let result = Cli::try_parse_from(["zapclaw", "--model-mode", "cloud"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unexpected argument") || err.contains("unknown argument"));
+    }
+
+    #[test]
+    fn test_cli_parser_rejects_short_m() {
+        // Test that -m is not recognized (clap default behavior)
+        let result = Cli::try_parse_from(["zapclaw", "-m", "cloud"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unexpected argument") || err.contains("unknown argument"));
+    }
 
     #[test]
     fn test_resolve_confirmation_mode_allow() {

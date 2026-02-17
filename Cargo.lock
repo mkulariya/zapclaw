@@ -3093,6 +3093,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "url",
  "uuid",
  "zapclaw-core",
  "zapclaw-tools",
