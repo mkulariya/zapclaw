@@ -1,6 +1,7 @@
 pub mod agent;
-pub mod config;
 pub mod confiner;
+pub mod egress_guard;
+pub mod config;
 pub mod llm;
 pub mod memory;
 pub mod sandbox;

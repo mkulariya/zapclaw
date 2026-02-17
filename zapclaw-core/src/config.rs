@@ -36,6 +36,9 @@ pub struct Config {
     /// Whether to require human confirmation for all tool calls
     pub require_confirmation: bool,
 
+    /// Enable egress guard for web_search and browse_url tools
+    pub enable_egress_guard: bool,
+
     /// Context window size in tokens (used for truncation calculations)
     pub context_window_tokens: usize,
 }
@@ -60,6 +63,7 @@ impl Default for Config {
             enable_inbound: false,
             tool_timeout_secs: 5,
             require_confirmation: true,
+            enable_egress_guard: true,
             context_window_tokens: 128_000,
         }
     }
@@ -115,6 +119,10 @@ impl Config {
 
         if let Ok(confirm) = std::env::var("ZAPCLAW_REQUIRE_CONFIRMATION") {
             config.require_confirmation = confirm.to_lowercase() != "false";
+        }
+
+        if let Ok(egress) = std::env::var("ZAPCLAW_ENABLE_EGRESS_GUARD") {
+            config.enable_egress_guard = egress.to_lowercase() != "false";
         }
 
         if let Ok(ctx) = std::env::var("ZAPCLAW_CONTEXT_WINDOW") {

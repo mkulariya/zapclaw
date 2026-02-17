@@ -553,3 +553,270 @@ async fn test_confirmation_allowed_tool_executes() {
     // Tool SHOULD have been executed
     assert_eq!(call_count.load(Ordering::SeqCst), 1, "Tool should execute when allowed");
 }
+
+// ============================================================================
+// Egress Guard Integration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_egress_guard_blocks_secret_in_web_search() {
+    // Mock LLM that calls web_search with a secret-bearing query
+    let responses = vec![
+        MockLlmClient::tool_call_response(
+            "web_search",
+            r#"{"query": "my api key is sk-1234567890abcdefghijklmnop"}"#,
+        ),
+        MockLlmClient::simple_response("Search failed due to blocked request."),
+    ];
+
+    let mock_llm = Arc::new(MockLlmClient::new(responses));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MemoryDb::new(temp_dir.path()).unwrap());
+
+    let mut tools = ToolRegistry::new();
+
+    // Mock web_search tool (should never be called due to egress guard)
+    struct MockWebSearchTool {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for MockWebSearchTool {
+        fn name(&self) -> &str { "web_search" }
+        fn description(&self) -> &str { "Search the web" }
+        fn requires_confirmation(&self) -> bool { false }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                },
+                "required": ["query"]
+            })
+        }
+        async fn execute(&self, _arguments: &str) -> Result<String> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok("Search results".to_string())
+        }
+    }
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    tools.register(Arc::new(MockWebSearchTool { call_count: call_count.clone() }));
+
+    let config = Config {
+        max_steps: 5,
+        require_confirmation: false,
+        tool_timeout_secs: 5,
+        enable_egress_guard: true,
+        ..Config::default()
+    };
+
+    let agent = Agent::new(mock_llm, memory, tools, config, false);
+
+    let result = agent.run("test_session", "search for my api key").await;
+
+    // Agent should succeed, but the response should mention the blocked egress
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert!(response.contains("Error:") || response.contains("EGRESS") || response.contains("blocked"),
+        "Response should indicate the egress was blocked: {}", response);
+
+    // Tool should NOT have been called
+    assert_eq!(call_count.load(Ordering::SeqCst), 0, "web_search should not execute with high-risk payload");
+}
+
+#[tokio::test]
+async fn test_egress_guard_blocks_secret_in_browse_url() {
+    // Mock LLM that calls browse_url with a secret-bearing URL
+    let responses = vec![
+        MockLlmClient::tool_call_response(
+            "browse_url",
+            r#"{"url": "https://example.com?token=abc123def456789"}"#,
+        ),
+        MockLlmClient::simple_response("Browse failed due to blocked request."),
+    ];
+
+    let mock_llm = Arc::new(MockLlmClient::new(responses));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MemoryDb::new(temp_dir.path()).unwrap());
+
+    let mut tools = ToolRegistry::new();
+
+    // Mock browse_url tool (should never be called due to egress guard)
+    struct MockBrowseUrlTool {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for MockBrowseUrlTool {
+        fn name(&self) -> &str { "browse_url" }
+        fn description(&self) -> &str { "Browse a URL" }
+        fn requires_confirmation(&self) -> bool { false }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"}
+                },
+                "required": ["url"]
+            })
+        }
+        async fn execute(&self, _arguments: &str) -> Result<String> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok("Page content".to_string())
+        }
+    }
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    tools.register(Arc::new(MockBrowseUrlTool { call_count: call_count.clone() }));
+
+    let config = Config {
+        max_steps: 5,
+        require_confirmation: false,
+        tool_timeout_secs: 5,
+        enable_egress_guard: true,
+        ..Config::default()
+    };
+
+    let agent = Agent::new(mock_llm, memory, tools, config, false);
+
+    let result = agent.run("test_session", "browse url with token").await;
+
+    // Agent should succeed, but the response should mention the blocked egress
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert!(response.contains("Error:") || response.contains("EGRESS") || response.contains("blocked"),
+        "Response should indicate the egress was blocked: {}", response);
+
+    // Tool should NOT have been called
+    assert_eq!(call_count.load(Ordering::SeqCst), 0, "browse_url should not execute with high-risk payload");
+}
+
+#[tokio::test]
+async fn test_egress_guard_allows_low_risk_web_search() {
+    // Mock LLM that calls web_search with a safe query
+    let responses = vec![
+        MockLlmClient::tool_call_response(
+            "web_search",
+            r#"{"query": "rust programming language tutorial"}"#,
+        ),
+        MockLlmClient::simple_response("Here are some rust programming resources..."),
+    ];
+
+    let mock_llm = Arc::new(MockLlmClient::new(responses));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MemoryDb::new(temp_dir.path()).unwrap());
+
+    let mut tools = ToolRegistry::new();
+
+    // Mock web_search tool
+    struct MockWebSearchTool {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for MockWebSearchTool {
+        fn name(&self) -> &str { "web_search" }
+        fn description(&self) -> &str { "Search the web" }
+        fn requires_confirmation(&self) -> bool { false }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                },
+                "required": ["query"]
+            })
+        }
+        async fn execute(&self, _arguments: &str) -> Result<String> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok("Search results for rust programming".to_string())
+        }
+    }
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    tools.register(Arc::new(MockWebSearchTool { call_count: call_count.clone() }));
+
+    let config = Config {
+        max_steps: 5,
+        require_confirmation: false,
+        tool_timeout_secs: 5,
+        enable_egress_guard: true,
+        ..Config::default()
+    };
+
+    let agent = Agent::new(mock_llm, memory, tools, config, false);
+
+    let result = agent.run("test_session", "search for rust tutorials").await;
+
+    // Agent should succeed
+    assert!(result.is_ok());
+
+    // Tool SHOULD have been called
+    assert_eq!(call_count.load(Ordering::SeqCst), 1, "web_search should execute with low-risk payload");
+}
+
+#[tokio::test]
+async fn test_egress_guard_disabled_allows_all_requests() {
+    // Mock LLM that calls web_search with a secret-bearing query
+    let responses = vec![
+        MockLlmClient::tool_call_response(
+            "web_search",
+            r#"{"query": "my api key is sk-1234567890abcdefghijklmnop"}"#,
+        ),
+        MockLlmClient::simple_response("Search executed (egress guard disabled)."),
+    ];
+
+    let mock_llm = Arc::new(MockLlmClient::new(responses));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MemoryDb::new(temp_dir.path()).unwrap());
+
+    let mut tools = ToolRegistry::new();
+
+    // Mock web_search tool
+    struct MockWebSearchTool {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for MockWebSearchTool {
+        fn name(&self) -> &str { "web_search" }
+        fn description(&self) -> &str { "Search the web" }
+        fn requires_confirmation(&self) -> bool { false }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                },
+                "required": ["query"]
+            })
+        }
+        async fn execute(&self, _arguments: &str) -> Result<String> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok("Search results".to_string())
+        }
+    }
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    tools.register(Arc::new(MockWebSearchTool { call_count: call_count.clone() }));
+
+    let config = Config {
+        max_steps: 5,
+        require_confirmation: false,
+        tool_timeout_secs: 5,
+        enable_egress_guard: false, // Disabled
+        ..Config::default()
+    };
+
+    let agent = Agent::new(mock_llm, memory, tools, config, false);
+
+    let result = agent.run("test_session", "search with secret (egress guard disabled)").await;
+
+    // Agent should succeed (egress guard disabled)
+    assert!(result.is_ok());
+
+    // Tool SHOULD have been called (no guard)
+    assert_eq!(call_count.load(Ordering::SeqCst), 1, "web_search should execute when egress guard is disabled");
+}
+

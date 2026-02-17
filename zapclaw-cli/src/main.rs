@@ -67,6 +67,10 @@ struct Cli {
     #[arg(long)]
     no_confirm: bool,
 
+    /// Disable egress guard for web_search and browse_url (DANGEROUS)
+    #[arg(long)]
+    no_egress_guard: bool,
+
     /// Skip bubblewrap sandbox (development only — NOT recommended for production)
     #[arg(long)]
     no_sandbox: bool,
@@ -319,6 +323,7 @@ async fn main() -> Result<()> {
     config.model_name = resolve_model_alias(&cli.model_name);
     config.max_steps = cli.max_steps;
     config.require_confirmation = !cli.no_confirm;
+    config.enable_egress_guard = !cli.no_egress_guard;
     config.tool_timeout_secs = cli.tool_timeout;
 
     config.llm_mode = match cli.model_mode.to_lowercase().as_str() {
@@ -349,6 +354,7 @@ async fn main() -> Result<()> {
     println!("  Max steps:  {}", config.max_steps);
     println!("  Timeout:    {}s", config.tool_timeout_secs);
     println!("  Confirm:    {}", if config.require_confirmation { "yes" } else { "no" });
+    println!("  Egress:     {}", if config.enable_egress_guard { "enabled" } else { "DISABLED (--no-egress-guard, UNSAFE)" });
     println!("  Sandbox:    {}", match sandbox_state {
         zapclaw_core::sandbox::SandboxState::Active => "active (bubblewrap, verified)",
         zapclaw_core::sandbox::SandboxState::Disabled => "DISABLED (--no-sandbox, UNSAFE)",

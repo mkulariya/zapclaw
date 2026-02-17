@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::egress_guard::{EgressGuard, EgressRiskLevel};
 use crate::llm::{
     ChatMessage, LlmClient, ToolCall, ToolDefinition,
 };
@@ -313,6 +314,7 @@ pub struct Agent {
     session_store: Option<SessionStore>,
     sandbox_active: bool,
     confirmation_mode: ConfirmationMode,
+    egress_guard: Option<EgressGuard>,
 }
 
 impl Agent {
@@ -328,6 +330,14 @@ impl Agent {
         let session_store = Some(SessionStore::new(&workspace_dir));
         let mut runtime_info = RuntimeInfo::detect();
         runtime_info.model = Some(config.model_name.clone());
+
+        // Initialize egress guard if enabled in config
+        let egress_guard = if config.enable_egress_guard {
+            Some(EgressGuard::with_defaults())
+        } else {
+            None
+        };
+
         Self {
             llm,
             memory,
@@ -339,6 +349,7 @@ impl Agent {
             session_store,
             sandbox_active,
             confirmation_mode: ConfirmationMode::Ask, // Default to safe interactive mode
+            egress_guard,
         }
     }
 
@@ -422,6 +433,7 @@ impl Agent {
         let tool_defs = self.tools.definitions();
         let mut step = 0;
         let mut final_response = String::new();
+        let mut recent_tool_outputs: VecDeque<String> = VecDeque::with_capacity(5);
 
         loop {
             step += 1;
@@ -496,7 +508,7 @@ impl Agent {
             // Execute each tool call
             for tool_call in &response.tool_calls {
                 let tool_result = self
-                    .execute_tool_call(tool_call)
+                    .execute_tool_call(tool_call, &recent_tool_outputs)
                     .await
                     .unwrap_or_else(|e| format!("Error: {}", e));
 
@@ -505,6 +517,14 @@ impl Agent {
                     tool_call.function.name,
                     &tool_result[..tool_result.len().min(200)]
                 );
+
+                // Track recent tool outputs for taint detection (max 5 items)
+                if !tool_result.starts_with("Error:") {
+                    recent_tool_outputs.push_back(tool_result.clone());
+                    if recent_tool_outputs.len() > 5 {
+                        recent_tool_outputs.pop_front();
+                    }
+                }
 
                 // Add tool result to messages
                 let tool_msg = ChatMessage {
@@ -603,6 +623,7 @@ impl Agent {
         let tool_defs = self.tools.definitions();
         let mut step = 0;
         let mut final_response = String::new();
+        let mut recent_tool_outputs: VecDeque<String> = VecDeque::with_capacity(5);
 
         loop {
             step += 1;
@@ -687,11 +708,19 @@ impl Agent {
                 }).await;
 
                 let tool_result = self
-                    .execute_tool_call(tool_call)
+                    .execute_tool_call(tool_call, &recent_tool_outputs)
                     .await
                     .unwrap_or_else(|e| format!("Error: {}", e));
 
                 let is_error = tool_result.starts_with("Error:");
+
+                // Track recent tool outputs for taint detection (max 5 items)
+                if !is_error {
+                    recent_tool_outputs.push_back(tool_result.clone());
+                    if recent_tool_outputs.len() > 5 {
+                        recent_tool_outputs.pop_front();
+                    }
+                }
 
                 // Emit tool end
                 let _ = tx.send(StreamChunk::ToolEnd {
@@ -727,7 +756,7 @@ impl Agent {
     }
 
     /// Execute a single tool call with safety checks and result truncation.
-    async fn execute_tool_call(&self, tool_call: &ToolCall) -> Result<String> {
+    async fn execute_tool_call(&self, tool_call: &ToolCall, recent_outputs: &VecDeque<String>) -> Result<String> {
         let tool_name = &tool_call.function.name;
 
         // Look up the tool
@@ -735,8 +764,108 @@ impl Agent {
             .get(tool_name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", tool_name))?;
 
+        // Egress guard check for web_search and browse_url
+        let mut egress_guard_confirmed = false;
+        if let Some(ref guard) = self.egress_guard {
+            if tool_name == "web_search" || tool_name == "browse_url" {
+                let assessment = if tool_name == "web_search" {
+                    guard.assess_web_search(&tool_call.function.arguments, recent_outputs)?
+                } else {
+                    guard.assess_browse_url(&tool_call.function.arguments, recent_outputs)?
+                };
+
+                // Log audit metadata
+                let audit_json = guard.assessment_to_audit_json(&assessment);
+                self.memory.log_action(
+                    &format!("egress_check:{}", tool_name),
+                    Some(&audit_json),
+                    None,
+                )?;
+
+                // Enforce risk-based decisions
+                match assessment.risk_level {
+                    EgressRiskLevel::High => {
+                        let error_msg = format!(
+                            "🚫 EGRESS BLOCKED: {} request rejected due to high-risk signals:\n  {}\n  Preview: {}",
+                            tool_name,
+                            assessment.signals.join("\n  "),
+                            assessment.preview
+                        );
+                        log::warn!("{}", error_msg);
+                        return Err(anyhow::anyhow!(error_msg));
+                    }
+                    EgressRiskLevel::Medium => {
+                        log::warn!(
+                            "⚠️  EGRESS WARNING: {} request has medium-risk signals:\n  {}",
+                            tool_name,
+                            assessment.signals.join("\n  ")
+                        );
+
+                        // Medium risk requires confirmation (same as sensitive tools)
+                        let interactive_terminal = has_interactive_terminal();
+                        let approved = match confirmation_decision_without_prompt(
+                            self.confirmation_mode,
+                            interactive_terminal,
+                        ) {
+                            Some(true) => {
+                                log::warn!("⚠️  --no-confirm enabled: medium-risk egress auto-approved");
+                                egress_guard_confirmed = true;
+                                true
+                            }
+                            Some(false) => {
+                                log::warn!("🚫 Medium-risk egress denied by confirmation mode");
+                                false
+                            }
+                            None => {
+                                // Prompt user with exact preview
+                                println!("\n🔒 ─── Egress Confirmation Required ─────────────────");
+                                println!("  Tool: {}", tool_name);
+                                println!("  Risk: MEDIUM");
+                                println!("  Signals:");
+                                for signal in &assessment.signals {
+                                    println!("    - {}", signal);
+                                }
+                                println!("  Preview: {}", assessment.preview);
+                                println!("────────────────────────────────────────────────────────");
+                                print!("  Allow this request? [y/N]: ");
+                                io::stdout().flush().unwrap();
+
+                                let mut input = String::new();
+                                if io::stdin().read_line(&mut input).is_err() {
+                                    false
+                                } else {
+                                    let answer = input.trim().to_lowercase();
+                                    matches!(answer.as_str(), "y" | "yes")
+                                }
+                            }
+                        };
+
+                        if !approved {
+                            let error_msg = format!(
+                                "🚫 EGRESS DENIED: {} request blocked (medium risk, user denied)",
+                                tool_name
+                            );
+                            log::warn!("{}", error_msg);
+                            return Err(anyhow::anyhow!(error_msg));
+                        }
+
+                        if egress_guard_confirmed {
+                            log::info!("✅ Medium-risk egress approved for '{}' (skips normal confirmation)", tool_name);
+                        } else {
+                            log::info!("✅ Medium-risk egress approved for '{}'", tool_name);
+                        }
+                    }
+                    EgressRiskLevel::Low => {
+                        log::debug!("✅ Egress check passed for '{}' (low risk)", tool_name);
+                    }
+                }
+            }
+        }
+
         // Check if confirmation is required
-        let needs_confirmation = tool.requires_confirmation() || self.config.require_confirmation;
+        // Skip normal confirmation if egress guard already confirmed (medium-risk case)
+        let needs_confirmation = !egress_guard_confirmed &&
+            (tool.requires_confirmation() || self.config.require_confirmation);
 
         if needs_confirmation {
             // Show args preview (head + tail for security)
