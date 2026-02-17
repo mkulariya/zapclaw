@@ -411,3 +411,145 @@ fn test_search_result_metadata() {
     assert!(r.fallback, "keyword-only results should be fallback");
     assert!(r.provider.is_none());
 }
+
+// --- Confirmation enforcement tests ---
+
+#[tokio::test]
+async fn test_confirmation_denied_tool_does_not_execute() {
+    use zapclaw_core::agent::{Agent, ConfirmationMode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Mock LLM that calls a tool requiring confirmation
+    let responses = vec![
+        LlmResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call1".to_string(),
+                call_type: "function".to_string(),
+                function: zapclaw_core::llm::FunctionCall {
+                    name: "dangerous_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+            finish_reason: "tool_calls".to_string(),
+            usage: None,
+        },
+        LlmResponse {
+            content: Some("Tool was denied".to_string()),
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+        },
+    ];
+
+    let mock_llm = Arc::new(MockLlmClient::new(responses));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MemoryDb::new(temp_dir.path()).unwrap());
+
+    let mut tools = ToolRegistry::new();
+
+    // Tool that requires confirmation
+    struct DangerousTool {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for DangerousTool {
+        fn name(&self) -> &str { "dangerous_tool" }
+        fn description(&self) -> &str { "A dangerous tool" }
+        fn requires_confirmation(&self) -> bool { true }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _arguments: &str) -> Result<String> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok("executed dangerous operation".to_string())
+        }
+    }
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    tools.register(Arc::new(DangerousTool { call_count: call_count.clone() }));
+
+    let config = Config::from_env();
+
+    // Test with Deny mode (headless/inbound)
+    let agent = Agent::new(mock_llm, memory, tools, config, false)
+        .with_confirmation_mode(ConfirmationMode::Deny);
+
+    let result = agent.run("test_session", "run dangerous tool").await;
+
+    // Agent should complete (with denial message in response)
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert!(response.contains("denied") || response.contains("cannot run"), "Response should mention denial");
+
+    // Tool should NOT have been executed
+    assert_eq!(call_count.load(Ordering::SeqCst), 0, "Tool should not execute when denied");
+}
+
+#[tokio::test]
+async fn test_confirmation_allowed_tool_executes() {
+    use zapclaw_core::agent::{Agent, ConfirmationMode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Mock LLM that calls a tool requiring confirmation
+    let responses = vec![
+        LlmResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call1".to_string(),
+                call_type: "function".to_string(),
+                function: zapclaw_core::llm::FunctionCall {
+                    name: "safe_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+            finish_reason: "tool_calls".to_string(),
+            usage: None,
+        },
+        LlmResponse {
+            content: Some("Task complete".to_string()),
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+        },
+    ];
+
+    let mock_llm = Arc::new(MockLlmClient::new(responses));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MemoryDb::new(temp_dir.path()).unwrap());
+
+    let mut tools = ToolRegistry::new();
+
+    // Tool that requires confirmation
+    struct SafeTool {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for SafeTool {
+        fn name(&self) -> &str { "safe_tool" }
+        fn description(&self) -> &str { "A safe tool" }
+        fn requires_confirmation(&self) -> bool { true }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _arguments: &str) -> Result<String> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok("safe operation complete".to_string())
+        }
+    }
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    tools.register(Arc::new(SafeTool { call_count: call_count.clone() }));
+
+    let config = Config::from_env();
+
+    // Test with Allow mode (--no-confirm)
+    let agent = Agent::new(mock_llm, memory, tools, config, false)
+        .with_confirmation_mode(ConfirmationMode::Allow);
+
+    let result = agent.run("test_session", "run safe tool").await;
+
+    // Agent should succeed
+    assert!(result.is_ok());
+
+    // Tool SHOULD have been executed
+    assert_eq!(call_count.load(Ordering::SeqCst), 1, "Tool should execute when allowed");
+}

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use zapclaw_core::agent::{Agent, ToolRegistry};
+use zapclaw_core::agent::{Agent, ConfirmationMode, ToolRegistry};
 use zapclaw_core::config::{Config, LlmMode};
 use zapclaw_core::confiner::Confiner;
 use zapclaw_core::llm::OpenAiCompatibleClient;
@@ -25,6 +25,7 @@ use zapclaw_tools::session_tool::SessionTool;
 use zapclaw_tools::web_search_tool::WebSearchTool;
 use std::sync::Arc;
 use std::path::PathBuf;
+use std::io::IsTerminal;
 
 /// ZapClaw 🦞 — Secure, lightweight AI agent
 #[derive(Parser, Debug)]
@@ -97,6 +98,30 @@ struct Cli {
     /// Self-update from GitHub releases
     #[arg(long)]
     update: bool,
+}
+
+/// Resolve confirmation policy from runtime mode + terminal capabilities.
+fn resolve_confirmation_mode(
+    no_confirm: bool,
+    enable_inbound: bool,
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+) -> ConfirmationMode {
+    if no_confirm {
+        return ConfirmationMode::Allow;
+    }
+
+    // Inbound/server mode is headless from the tool-approval standpoint.
+    if enable_inbound {
+        return ConfirmationMode::Deny;
+    }
+
+    // Non-interactive shell (pipe/CI/service): deny by default.
+    if !stdin_is_tty || !stdout_is_tty {
+        return ConfirmationMode::Deny;
+    }
+
+    ConfirmationMode::Ask
 }
 
 /// Run agent with streaming output.
@@ -397,7 +422,39 @@ async fn main() -> Result<()> {
     println!();
 
     let sandbox_active = sandbox_state == zapclaw_core::sandbox::SandboxState::Active;
-    let agent = Arc::new(Agent::new(llm, memory.clone(), tools, config, sandbox_active));
+
+    // Determine confirmation mode from CLI flags + terminal capabilities
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let confirmation_mode = resolve_confirmation_mode(
+        cli.no_confirm,
+        cli.enable_inbound,
+        stdin_is_tty,
+        stdout_is_tty,
+    );
+
+    match confirmation_mode {
+        ConfirmationMode::Allow => {
+            log::warn!("⚠️  Confirmation disabled via --no-confirm. Sensitive tools will execute WITHOUT approval.");
+        }
+        ConfirmationMode::Deny if cli.enable_inbound => {
+            log::info!("🔒 Confirmation mode set to Deny (inbound/headless safety mode).");
+        }
+        ConfirmationMode::Deny => {
+            log::warn!(
+                "🔒 Non-interactive terminal detected (stdin_tty={}, stdout_tty={}). \
+                 Confirmation mode set to Deny.",
+                stdin_is_tty,
+                stdout_is_tty
+            );
+        }
+        ConfirmationMode::Ask => {}
+    }
+
+    let agent = Arc::new(
+        Agent::new(llm, memory.clone(), tools, config, sandbox_active)
+            .with_confirmation_mode(confirmation_mode)
+    );
 
     let session_store = SessionStore::new(&workspace);
     let mut session_id = uuid::Uuid::new_v4().to_string();
@@ -619,6 +676,38 @@ async fn main() -> Result<()> {
     ).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_confirmation_mode_allow() {
+        let mode = resolve_confirmation_mode(true, false, true, true);
+        assert_eq!(mode, ConfirmationMode::Allow);
+    }
+
+    #[test]
+    fn test_resolve_confirmation_mode_deny_inbound() {
+        let mode = resolve_confirmation_mode(false, true, true, true);
+        assert_eq!(mode, ConfirmationMode::Deny);
+    }
+
+    #[test]
+    fn test_resolve_confirmation_mode_deny_non_interactive() {
+        let mode = resolve_confirmation_mode(false, false, false, true);
+        assert_eq!(mode, ConfirmationMode::Deny);
+
+        let mode = resolve_confirmation_mode(false, false, true, false);
+        assert_eq!(mode, ConfirmationMode::Deny);
+    }
+
+    #[test]
+    fn test_resolve_confirmation_mode_ask_interactive() {
+        let mode = resolve_confirmation_mode(false, false, true, true);
+        assert_eq!(mode, ConfirmationMode::Ask);
+    }
 }
 
 /// Inbound tunnel processing loop — receives tasks from remote clients,

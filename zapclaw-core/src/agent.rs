@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,6 +12,31 @@ use crate::llm::{
 use crate::memory::MemoryDb;
 use crate::sanitizer::InputSanitizer;
 use crate::session::SessionStore;
+
+/// Interactive confirmation prompt for CLI.
+///
+/// This is used by ConfirmationMode::Ask to get user approval.
+fn confirm_action_default(tool_name: &str, description: &str) -> bool {
+    println!("\n🔒 ─── Confirmation Required ───────────────────────");
+    println!("  Tool: {}", tool_name);
+    println!("  Action: {}", description);
+    println!("────────────────────────────────────────────────────");
+    print!("  Proceed? [y/N]: ");
+    io::stdout().flush().unwrap();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+
+    let answer = input.trim().to_lowercase();
+    matches!(answer.as_str(), "y" | "yes")
+}
+
+/// Returns true when stdin/stdout are interactive terminals.
+fn has_interactive_terminal() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
 
 /// Tool trait — implemented by all ZapClaw tools.
 ///
@@ -31,6 +57,43 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the given JSON arguments string.
     async fn execute(&self, arguments: &str) -> Result<String>;
+}
+
+/// Confirmation mode determines how tools requiring approval are handled.
+///
+/// This is a security-critical setting that controls the approval policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmationMode {
+    /// Ask user interactively for each tool requiring confirmation.
+    /// Used in normal CLI/REPL mode.
+    Ask,
+
+    /// Automatically allow all tools (even those requiring confirmation).
+    /// Used when --no-confirm flag is set. DANGEROUS: disables safety checks.
+    Allow,
+
+    /// Automatically deny tools requiring confirmation.
+    /// Used in headless/inbound mode where no TTY is available.
+    /// This is the safe default for unattended operation.
+    Deny,
+}
+
+/// Resolve confirmation result without prompting.
+///
+/// Returns:
+/// - `Some(true)` when action is auto-approved
+/// - `Some(false)` when action is auto-denied
+/// - `None` when interactive prompt is required
+fn confirmation_decision_without_prompt(
+    mode: ConfirmationMode,
+    interactive_terminal: bool,
+) -> Option<bool> {
+    match mode {
+        ConfirmationMode::Allow => Some(true),
+        ConfirmationMode::Deny => Some(false),
+        ConfirmationMode::Ask if !interactive_terminal => Some(false),
+        ConfirmationMode::Ask => None,
+    }
 }
 
 /// Tool registry — holds all available tools.
@@ -249,6 +312,7 @@ pub struct Agent {
     workspace_dir: PathBuf,
     session_store: Option<SessionStore>,
     sandbox_active: bool,
+    confirmation_mode: ConfirmationMode,
 }
 
 impl Agent {
@@ -274,7 +338,18 @@ impl Agent {
             config,
             session_store,
             sandbox_active,
+            confirmation_mode: ConfirmationMode::Ask, // Default to safe interactive mode
         }
+    }
+
+    /// Set the confirmation mode for tools requiring approval.
+    ///
+    /// - `Ask`: Prompt user interactively (default, safest for CLI)
+    /// - `Allow`: Auto-approve all tools (dangerous, for --no-confirm)
+    /// - `Deny`: Auto-deny tools requiring confirmation (safe default for inbound/headless)
+    pub fn with_confirmation_mode(mut self, mode: ConfirmationMode) -> Self {
+        self.confirmation_mode = mode;
+        self
     }
 
     /// Get the session store (for external session management).
@@ -661,12 +736,80 @@ impl Agent {
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", tool_name))?;
 
         // Check if confirmation is required
-        if tool.requires_confirmation() || self.config.require_confirmation {
+        let needs_confirmation = tool.requires_confirmation() || self.config.require_confirmation;
+
+        if needs_confirmation {
+            // Show args preview (head + tail for security)
+            let args = &tool_call.function.arguments;
+            let preview = if args.len() > 300 {
+                format!("{}...{}", &args[..150], &args[args.len()-150..])
+            } else {
+                args.clone()
+            };
+
             log::info!(
                 "⚠️  Tool '{}' requires confirmation. Args: {}",
                 tool_name,
-                &tool_call.function.arguments[..tool_call.function.arguments.len().min(200)]
+                preview
             );
+
+            let interactive_terminal = has_interactive_terminal();
+
+            // Check approval based on confirmation mode + terminal capabilities.
+            let approved = match confirmation_decision_without_prompt(
+                self.confirmation_mode,
+                interactive_terminal,
+            ) {
+                Some(true) => {
+                    log::warn!(
+                        "⚠️  --no-confirm enabled: tool '{}' approved without confirmation",
+                        tool_name
+                    );
+                    true
+                }
+                Some(false) => {
+                    match self.confirmation_mode {
+                        ConfirmationMode::Deny => {
+                            log::warn!(
+                                "🚫 Tool '{}' denied: requires confirmation but running in headless/inbound mode",
+                                tool_name
+                            );
+                        }
+                        ConfirmationMode::Ask => {
+                            log::warn!(
+                                "🚫 Tool '{}' denied: confirmation requested in Ask mode but no interactive terminal is available",
+                                tool_name
+                            );
+                        }
+                        ConfirmationMode::Allow => unreachable!(),
+                    }
+                    false
+                }
+                None => {
+                    // Prompt user interactively
+                    confirm_action_default(tool_name, &preview)
+                }
+            };
+
+            if !approved {
+                let error_msg = match self.confirmation_mode {
+                    ConfirmationMode::Ask if !interactive_terminal => format!(
+                        "Tool '{}' requires confirmation but no interactive terminal is available.",
+                        tool_name
+                    ),
+                    ConfirmationMode::Ask => format!("Tool '{}' was denied by user.", tool_name),
+                    ConfirmationMode::Deny => format!(
+                        "Tool '{}' requires confirmation and cannot run in headless/inbound mode. \
+                        Use --no-confirm to disable confirmation (NOT recommended).",
+                        tool_name
+                    ),
+                    ConfirmationMode::Allow => unreachable!(), // Allow mode always returns true
+                };
+                log::warn!("🚫 {}", error_msg);
+                return Err(anyhow::anyhow!(error_msg));
+            }
+
+            log::info!("✅ Tool '{}' approved", tool_name);
         }
 
         // Execute with timeout
@@ -927,6 +1070,26 @@ mod tests {
         let info = RuntimeInfo::detect();
         assert!(info.os.is_some());
         assert!(info.arch.is_some());
+    }
+
+    #[test]
+    fn test_confirmation_decision_without_prompt() {
+        assert_eq!(
+            confirmation_decision_without_prompt(ConfirmationMode::Allow, false),
+            Some(true)
+        );
+        assert_eq!(
+            confirmation_decision_without_prompt(ConfirmationMode::Deny, true),
+            Some(false)
+        );
+        assert_eq!(
+            confirmation_decision_without_prompt(ConfirmationMode::Ask, false),
+            Some(false)
+        );
+        assert_eq!(
+            confirmation_decision_without_prompt(ConfirmationMode::Ask, true),
+            None
+        );
     }
 
     #[test]
