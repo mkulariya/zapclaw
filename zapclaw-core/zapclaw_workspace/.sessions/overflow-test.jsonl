@@ -1,3 +1,33 @@
 {"timestamp":"2026-02-15T17:44:43.893310418+00:00","role":"header","content":"Session overflow-test started"}
 {"timestamp":"2026-02-15T17:44:43.895294999+00:00","role":"user","content":"Hello"}
 {"timestamp":"2026-02-15T17:44:43.895575848+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T16:43:04.861660878+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T16:43:04.862848079+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T16:47:48.714468017+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T16:47:48.715834523+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T17:09:29.766119280+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T17:09:29.766407036+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T17:14:55.272702763+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T17:14:55.273040750+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T17:44:22.178763696+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T17:44:22.179061048+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T17:45:02.786103952+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T17:45:02.786434565+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T17:53:27.875361956+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T17:53:27.875632514+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T18:03:48.543427742+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T18:03:48.543755075+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T18:23:26.186694015+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T18:23:26.186995298+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T18:26:23.128084843+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T18:26:23.128500918+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T19:09:36.302479673+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T19:09:36.302749965+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T20:18:11.564307956+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T20:18:11.564563228+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T21:07:58.176565897+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T21:07:58.176950421+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-17T21:18:38.252167892+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-17T21:18:38.253539630+00:00","role":"assistant","content":"Recovered after overflow."}
+{"timestamp":"2026-02-18T18:05:34.707945832+00:00","role":"user","content":"Hello"}
+{"timestamp":"2026-02-18T18:05:34.709336693+00:00","role":"assistant","content":"Recovered after overflow."}

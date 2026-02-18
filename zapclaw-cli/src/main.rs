@@ -31,9 +31,21 @@ use std::io::IsTerminal;
 #[derive(Parser, Debug)]
 #[command(name = "zapclaw", version, about = "ZapClaw 🦞 — Secure, lightweight AI agent")]
 struct Cli {
+    /// Config file path (disables layered home+project discovery)
+    #[arg(short, long)]
+    config: Option<String>,
+
+    /// Initialize a new config file template and exit
+    #[arg(long)]
+    init_config: bool,
+
+    /// Print effective configuration (merged from file/env/CLI) and exit
+    #[arg(long)]
+    print_effective_config: bool,
+
     /// Workspace directory path
-    #[arg(short, long, default_value = "./zapclaw_workspace")]
-    workspace: String,
+    #[arg(short, long)]
+    workspace: Option<String>,
 
     /// Model name (e.g., "phi3:mini" for Ollama, "gpt-4o" for OpenAI)
     #[arg(short = 'n', long, env = "ZAPCLAW_MODEL")]
@@ -52,8 +64,8 @@ struct Cli {
     search_api_key: Option<String>,
 
     /// Maximum agent steps per task
-    #[arg(long, default_value = "15")]
-    max_steps: usize,
+    #[arg(long)]
+    max_steps: Option<usize>,
 
     /// Run a single task and exit (non-interactive mode)
     #[arg(short, long)]
@@ -76,20 +88,20 @@ struct Cli {
     sandbox_no_network: bool,
 
     /// Tool execution timeout in seconds
-    #[arg(long, default_value = "30")]
-    tool_timeout: u64,
+    #[arg(long)]
+    tool_timeout: Option<u64>,
 
     /// Enable remote JSON-RPC server for inbound task submission
     #[arg(long)]
     enable_inbound: bool,
 
     /// Inbound server port
-    #[arg(long, default_value = "9876")]
-    inbound_port: u16,
+    #[arg(long)]
+    inbound_port: Option<u16>,
 
     /// Inbound server bind address
-    #[arg(long, default_value = "127.0.0.1")]
-    inbound_bind: String,
+    #[arg(long)]
+    inbound_bind: Option<String>,
 
     /// API key for inbound tunnel auth
     #[arg(long, env = "ZAPCLAW_INBOUND_KEY")]
@@ -133,22 +145,105 @@ fn is_strict_loopback(host: &str) -> bool {
     false
 }
 
-/// Resolve and validate LLM settings from CLI/env inputs
-fn resolve_llm_settings(cli: &Cli) -> Result<ResolvedLlmSettings> {
-    // Resolve api_base_url from CLI or env
-    let api_base_url = cli
-        .api_url
-        .clone()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "⛔ Missing required field: --api-url (or ZAPCLAW_API_BASE_URL env var)\n\
-                 \n\
-                 ZapClaw requires an explicit LLM endpoint URL. Examples:\n\
-                 • Ollama (local): --api-url http://localhost:11434/v1\n\
-                 • OpenAI (cloud): --api-url https://api.openai.com/v1\n\
-                 • Custom: --api-url http://your-host:port/v1"
-            )
-        })?;
+/// Handle --init-config flag
+fn handle_init_config(cli: &Cli) -> Result<()> {
+    // Determine which path to initialize
+    let config_path = if let Some(ref path_str) = cli.config {
+        // Explicit path via --config
+        PathBuf::from(path_str)
+    } else {
+        // Default: project config (./zapclaw.json)
+        Config::resolve_project_config_path()
+    };
+
+    if config_path.exists() {
+        bail!(
+            "⛔ Config file already exists at {}\n\
+             To overwrite, remove the existing file first.",
+            config_path.display()
+        );
+    }
+
+    // Generate template
+    let template = Config::default_template_json(&config_path);
+
+    // Write to file with restrictive permissions
+    std::fs::write(&config_path, template)
+        .with_context(|| format!("Failed to write config file to {}", config_path.display()))?;
+
+    // Set restrictive permissions (0600) on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&config_path, perms)
+            .with_context(|| format!("Failed to set permissions on {}", config_path.display()))?;
+    }
+
+    println!("✅ Config file created at: {}", config_path.display());
+    println!();
+    println!("Next steps:");
+    println!("  1. Edit the config file to set your preferred values");
+    println!("  2. Set API keys via environment variables:");
+    println!("     export ZAPCLAW_API_KEY=\"your-key-here\"");
+    println!("     export ZAPCLAW_SEARCH_API_KEY=\"your-brave-key\"  # Optional");
+    println!("     export ZAPCLAW_INBOUND_KEY=\"your-inbound-key\"    # For remote access");
+    println!("  3. Run zapclaw normally");
+    
+    if config_path == Config::resolve_project_config_path() {
+        println!();
+        println!("Note: This is a project-level config (./zapclaw.json).");
+        println!("It will override values from your home config (~/.zapclaw/zapclaw.json).");
+    }
+
+    Ok(())
+}
+
+/// Handle --print-effective-config flag
+fn handle_print_effective_config(config: &Config) -> Result<()> {
+    let json = config.to_persisted_json()
+        .context("Failed to serialize config")?;
+
+    println!("{}", json);
+    println!();
+    println!("Note: Secret values (API keys) are not shown for security.");
+    println!("They must be set via environment variables or CLI flags.");
+
+    Ok(())
+}
+
+/// Resolve LLM settings from CLI or merged config
+fn resolve_llm_settings_from_config(cli: &Cli, config: &Config) -> Result<ResolvedLlmSettings> {
+    // CLI args take precedence over config file
+    let api_base_url = if let Some(url) = &cli.api_url {
+        url.clone()
+    } else if !config.api_base_url.is_empty() {
+        config.api_base_url.clone()
+    } else {
+        bail!(
+            "⛔ Missing required field: --api-url (or ZAPCLAW_API_BASE_URL env var or api_base_url in config file)\n\
+             \n\
+             ZapClaw requires an explicit LLM endpoint URL. Examples:\n\
+             • Ollama (local): --api-url http://localhost:11434/v1\n\
+             • OpenAI (cloud): --api-url https://api.openai.com/v1\n\
+             • Custom: --api-url http://your-host:port/v1"
+        )
+    };
+
+    let model_name = if let Some(model) = &cli.model_name {
+        model.clone()
+    } else if !config.model_name.is_empty() {
+        config.model_name.clone()
+    } else {
+        bail!(
+            "⛔ Missing required field: --model-name (or ZAPCLAW_MODEL env var or model_name in config file)\n\
+             \n\
+             ZapClaw requires an explicit model identifier. Examples:\n\
+             • Ollama: --model-name phi3:mini\n\
+             • OpenAI: --model-name gpt-4o\n\
+             • Custom: --model-name your-model-name"
+        )
+    };
 
     // Validate URL format
     let parsed_url: url::Url = api_base_url.parse().context("Invalid --api-url format")?;
@@ -173,24 +268,8 @@ fn resolve_llm_settings(cli: &Cli) -> Result<ResolvedLlmSettings> {
             )
         })?;
 
-    // Resolve model_name from CLI or env
-    let model_name = cli
-        .model_name
-        .clone()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "⛔ Missing required field: --model-name (or ZAPCLAW_MODEL env var)\n\
-                 \n\
-                 ZapClaw requires an explicit model identifier. Examples:\n\
-                 • Ollama: --model-name phi3:mini\n\
-                 • OpenAI: --model-name gpt-4o\n\
-                 • Custom: --model-name your-model-name"
-            )
-        })?
-        .trim()
-        .to_string();
-
     // Validate model_name is not empty
+    let model_name = model_name.trim().to_string();
     if model_name.is_empty() {
         bail!("⛔ --model-name cannot be empty");
     }
@@ -202,8 +281,11 @@ fn resolve_llm_settings(cli: &Cli) -> Result<ResolvedLlmSettings> {
         EndpointKind::Remote
     };
 
-    // Resolve api_key from CLI or env
-    let api_key = cli.api_key.clone().or_else(|| std::env::var("ZAPCLAW_API_KEY").ok());
+    // Resolve api_key from CLI, env, or config (config keys are ignored for secrets)
+    let api_key = cli.api_key
+        .clone()
+        .or_else(|| Config::api_key())
+        .or_else(|| std::env::var("ZAPCLAW_API_KEY").ok());
 
     // Validate api_key requirement for remote endpoints
     if endpoint_kind == EndpointKind::Remote && api_key.is_none() {
@@ -370,8 +452,9 @@ async fn self_update() -> Result<()> {
 }
 
 /// Resolve workspace path for sandbox bind mount (before full Config init).
-fn resolve_workspace_for_sandbox(workspace_arg: &str) -> std::path::PathBuf {
-    let path = std::path::PathBuf::from(workspace_arg);
+fn resolve_workspace_for_sandbox(workspace_arg: &Option<String>) -> std::path::PathBuf {
+    let ws_str = workspace_arg.as_ref().map(|s| s.as_str()).unwrap_or("./zapclaw_workspace");
+    let path = std::path::PathBuf::from(ws_str);
     if path.is_absolute() {
         path
     } else {
@@ -415,7 +498,88 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Sandbox enforcement — must happen FIRST, before any other initialization.
+    // Handle --init-config flag
+    if cli.init_config {
+        return handle_init_config(&cli);
+    }
+
+    // Resolve config mode and paths
+    let cli_config_path = cli.config.as_deref().map(PathBuf::from);
+    let (config_mode, config_paths) = Config::resolve_config_paths(cli_config_path.as_deref());
+
+    // Auto-create home config if in layered mode and home doesn't exist
+    if config_mode == "layered" {
+        match Config::ensure_home_config_exists() {
+            Ok(created) => {
+                if created {
+                    log::info!("✅ Created home config: {}", Config::resolve_home_config_path().display());
+                }
+            }
+            Err(e) => {
+                // Home config creation failed - this is critical for layered mode
+                log::error!("⛔ Failed to create home config: {}", e);
+                log::error!("ZapClaw requires a writable home directory for configuration.");
+                log::error!("Home config path: {}", Config::resolve_home_config_path().display());
+                return Err(e.context("Failed to create home config. \
+                    You can bypass this by using --config <path> to specify an explicit config file."));
+            }
+        }
+    }
+
+    // Load and merge file configs
+    let explicit_mode = config_mode == "explicit";
+    let file_config = Config::load_and_merge_files(&config_paths, explicit_mode)
+        .with_context(|| format!("Failed to load config from {:?}", config_paths))?;
+
+    // Load env config
+    let env_config = Config::from_env();
+
+    // Merge file and env configs (precedence: Env > File > Defaults)
+    let mut config = Config::from_sources(&file_config, &env_config);
+
+    // Apply CLI overrides (highest precedence)
+    if let Some(ws) = &cli.workspace {
+        config.workspace_path = PathBuf::from(ws);
+    }
+    if let Some(url) = &cli.api_url {
+        config.api_base_url = url.clone();
+    }
+    if let Some(model) = &cli.model_name {
+        config.model_name = model.clone();
+    }
+    if let Some(steps) = cli.max_steps {
+        config.max_steps = steps;
+    }
+    if let Some(timeout) = cli.tool_timeout {
+        config.tool_timeout_secs = timeout;
+    }
+    if cli.no_confirm {
+        config.require_confirmation = false;
+    }
+    if cli.no_egress_guard {
+        config.enable_egress_guard = false;
+    }
+    if cli.enable_inbound {
+        config.enable_inbound = true;
+    }
+    if let Some(port) = cli.inbound_port {
+        config.inbound_port = port;
+    }
+    if let Some(bind) = &cli.inbound_bind {
+        config.inbound_bind = bind.clone();
+    }
+
+    // Handle --print-effective-config flag
+    if cli.print_effective_config {
+        return handle_print_effective_config(&config);
+    }
+
+    // Self-update mode
+    if cli.update {
+        return self_update().await;
+    }
+
+    // Sandbox enforcement — must happen BEFORE workspace resolution.
     //
     // IMPORTANT: ensure_sandboxed() now implements FAIL-CLOSED behavior:
     // - If sandbox is verified (env + runtime evidence), returns Active
@@ -426,31 +590,20 @@ async fn main() -> Result<()> {
     let sandbox_state = if cli.no_sandbox {
         zapclaw_core::sandbox::SandboxState::Disabled
     } else {
-        // Resolve workspace path early for the sandbox bind mount
-        let ws_path = resolve_workspace_for_sandbox(&cli.workspace);
+        // Use the MERGED workspace path for sandbox bind mount, not CLI only
+        let ws_path = resolve_workspace_for_sandbox(&Some(config.workspace_path.to_string_lossy().to_string()));
         zapclaw_core::sandbox::ensure_sandboxed(&ws_path, cli.sandbox_no_network)?
         // NOTE: If bwrap is available, ensure_sandboxed() does NOT return —
         // it replaces this process via exec(). If we reach here, we're
         // verified as sandboxed (Active).
     };
 
-    // Self-update mode
-    if cli.update {
-        return self_update().await;
-    }
-
     // Resolve and validate LLM settings (fail fast on missing/invalid config)
-    let llm_settings = resolve_llm_settings(&cli)?;
+    let llm_settings = resolve_llm_settings_from_config(&cli, &config)?;
 
-    // Build configuration
-    let mut config = Config::from_env();
-    config.workspace_path = cli.workspace.into();
+    // Update config with resolved model name (for alias support)
     config.model_name = resolve_model_alias(&llm_settings.model_name);
     config.api_base_url = llm_settings.api_base_url.clone();
-    config.max_steps = cli.max_steps;
-    config.require_confirmation = !cli.no_confirm;
-    config.enable_egress_guard = !cli.no_egress_guard;
-    config.tool_timeout_secs = cli.tool_timeout;
 
     // Resolve workspace
     let workspace = config.resolve_workspace()
@@ -581,6 +734,10 @@ async fn main() -> Result<()> {
         ConfirmationMode::Ask => {}
     }
 
+    // Extract inbound config values before moving config
+    let inbound_bind = config.inbound_bind.clone();
+    let inbound_port = config.inbound_port;
+
     let agent = Arc::new(
         Agent::new(llm, memory.clone(), tools, config, sandbox_active)
             .with_confirmation_mode(confirmation_mode)
@@ -609,8 +766,8 @@ async fn main() -> Result<()> {
 
         let inbound_config = InboundConfig {
             enabled: true,
-            bind_address: cli.inbound_bind.clone(),
-            rpc_port: cli.inbound_port,
+            bind_address: inbound_bind.clone(),
+            rpc_port: inbound_port,
             api_key: Some(api_key),
             max_concurrent: 5,
             workspace_root: Some(workspace.clone()),
@@ -628,7 +785,8 @@ async fn main() -> Result<()> {
             inbound_processing_loop(inbound_agent, inbound_rx, inbound_shutdown).await;
         });
 
-        println!("  Inbound:    {}:{} (remote access enabled)", cli.inbound_bind, cli.inbound_port);
+        println!("  Inbound:    {}:{} (remote access enabled)", inbound_bind, inbound_port);
+        println!();
         println!();
 
         Some((tunnel_handle, processing_handle))
@@ -812,6 +970,46 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    fn make_test_cli(
+        api_url: Option<&str>,
+        model_name: Option<&str>,
+        api_key: Option<&str>,
+    ) -> Cli {
+        Cli {
+            config: None,
+            init_config: false,
+            print_effective_config: false,
+            workspace: None,
+            model_name: model_name.map(|s| s.to_string()),
+            api_url: api_url.map(|s| s.to_string()),
+            api_key: api_key.map(|s| s.to_string()),
+            search_api_key: None,
+            max_steps: None,
+            task: None,
+            no_confirm: false,
+            no_egress_guard: false,
+            no_sandbox: true,
+            sandbox_no_network: false,
+            tool_timeout: None,
+            enable_inbound: false,
+            inbound_port: None,
+            inbound_bind: None,
+            inbound_api_key: None,
+            update: false,
+        }
+    }
+
+    fn make_test_config(
+        api_base_url: &str,
+        model_name: &str,
+    ) -> Config {
+        Config {
+            api_base_url: api_base_url.to_string(),
+            model_name: model_name.to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_is_strict_loopback() {
         // Case-insensitive hostname
@@ -837,141 +1035,96 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_llm_settings_missing_api_url() {
-        let cli = Cli {
-            workspace: "./test_workspace".to_string(),
-            model_name: Some("phi3:mini".to_string()),
-            api_url: None,
-            api_key: None,
-            search_api_key: None,
-            max_steps: 15,
-            task: None,
-            no_confirm: false,
-            no_egress_guard: false,
-            no_sandbox: true,
-            sandbox_no_network: false,
-            tool_timeout: 30,
-            enable_inbound: false,
-            inbound_port: 9876,
-            inbound_bind: "127.0.0.1".to_string(),
-            inbound_api_key: None,
-            update: false,
+    fn test_resolve_llm_settings_from_config_cli_overrides_file() {
+        let cli = make_test_cli(
+            Some("http://cli.com/v1"),
+            Some("cli-model"),
+            Some("sk-test-key"), // Add API key since cli.com is not loopback
+        );
+
+        let config = make_test_config("http://file.com/v1", "file-model");
+
+        let result = resolve_llm_settings_from_config(&cli, &config);
+        assert!(result.is_ok());
+        let settings = result.unwrap();
+        // CLI should override config file
+        assert_eq!(settings.api_base_url, "http://cli.com/v1");
+        assert_eq!(settings.model_name, "cli-model");
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_from_config_fallback_to_file() {
+        let cli = make_test_cli(None, None, None);
+
+        let config = make_test_config("http://localhost:11434/v1", "phi3:mini");
+
+        let result = resolve_llm_settings_from_config(&cli, &config);
+        assert!(result.is_ok());
+        let settings = result.unwrap();
+        // Should use config file values
+        assert_eq!(settings.api_base_url, "http://localhost:11434/v1");
+        assert_eq!(settings.model_name, "phi3:mini");
+    }
+
+    #[test]
+    fn test_resolve_llm_settings_from_config_missing_both() {
+        let cli = make_test_cli(None, None, None);
+
+        let config = Config {
+            api_base_url: String::new(),
+            model_name: String::new(),
+            ..Default::default()
         };
 
-        let result = resolve_llm_settings(&cli);
+        let result = resolve_llm_settings_from_config(&cli, &config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Missing required field: --api-url"));
     }
 
     #[test]
-    fn test_resolve_llm_settings_missing_model_name() {
-        let cli = Cli {
-            workspace: "./test_workspace".to_string(),
-            model_name: None,
-            api_url: Some("http://localhost:11434/v1".to_string()),
-            api_key: None,
-            search_api_key: None,
-            max_steps: 15,
-            task: None,
-            no_confirm: false,
-            no_egress_guard: false,
-            no_sandbox: true,
-            sandbox_no_network: false,
-            tool_timeout: 30,
-            enable_inbound: false,
-            inbound_port: 9876,
-            inbound_bind: "127.0.0.1".to_string(),
-            inbound_api_key: None,
-            update: false,
-        };
+    fn test_resolve_llm_settings_from_config_invalid_scheme() {
+        let cli = make_test_cli(
+            Some("ftp://localhost:11434/v1"),
+            Some("phi3:mini"),
+            None,
+        );
 
-        let result = resolve_llm_settings(&cli);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Missing required field: --model-name"));
-    }
+        let config = Config::default();
 
-    #[test]
-    fn test_resolve_llm_settings_invalid_scheme() {
-        let cli = Cli {
-            workspace: "./test_workspace".to_string(),
-            model_name: Some("phi3:mini".to_string()),
-            api_url: Some("ftp://localhost:11434/v1".to_string()),
-            api_key: None,
-            search_api_key: None,
-            max_steps: 15,
-            task: None,
-            no_confirm: false,
-            no_egress_guard: false,
-            no_sandbox: true,
-            sandbox_no_network: false,
-            tool_timeout: 30,
-            enable_inbound: false,
-            inbound_port: 9876,
-            inbound_bind: "127.0.0.1".to_string(),
-            inbound_api_key: None,
-            update: false,
-        };
-
-        let result = resolve_llm_settings(&cli);
+        let result = resolve_llm_settings_from_config(&cli, &config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Invalid --api-url scheme"));
     }
 
     #[test]
-    fn test_resolve_llm_settings_missing_host() {
-        // Use an invalid URL format that will fail to parse
-        let cli = Cli {
-            workspace: "./test_workspace".to_string(),
-            model_name: Some("phi3:mini".to_string()),
-            api_url: Some("not-a-url".to_string()),
-            api_key: None,
-            search_api_key: None,
-            max_steps: 15,
-            task: None,
-            no_confirm: false,
-            no_egress_guard: false,
-            no_sandbox: true,
-            sandbox_no_network: false,
-            tool_timeout: 30,
-            enable_inbound: false,
-            inbound_port: 9876,
-            inbound_bind: "127.0.0.1".to_string(),
-            inbound_api_key: None,
-            update: false,
-        };
+    fn test_resolve_llm_settings_from_config_invalid_url() {
+        let cli = make_test_cli(
+            Some("not-a-url"),
+            Some("phi3:mini"),
+            None,
+        );
 
-        let result = resolve_llm_settings(&cli);
+        let config = Config::default();
+
+        let result = resolve_llm_settings_from_config(&cli, &config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Invalid --api-url") || err.contains("format"));
     }
 
     #[test]
-    fn test_resolve_llm_settings_loopback_without_key() {
-        let cli = Cli {
-            workspace: "./test_workspace".to_string(),
-            model_name: Some("phi3:mini".to_string()),
-            api_url: Some("http://localhost:11434/v1".to_string()),
-            api_key: None,
-            search_api_key: None,
-            max_steps: 15,
-            task: None,
-            no_confirm: false,
-            no_egress_guard: false,
-            no_sandbox: true,
-            sandbox_no_network: false,
-            tool_timeout: 30,
-            enable_inbound: false,
-            inbound_port: 9876,
-            inbound_bind: "127.0.0.1".to_string(),
-            inbound_api_key: None,
-            update: false,
-        };
+    fn test_resolve_llm_settings_from_config_loopback_without_key() {
+        let cli = make_test_cli(
+            Some("http://localhost:11434/v1"),
+            Some("phi3:mini"),
+            None,
+        );
 
-        let result = resolve_llm_settings(&cli);
+        let config = Config::default();
+
+        let result = resolve_llm_settings_from_config(&cli, &config);
         assert!(result.is_ok());
         let settings = result.unwrap();
         assert_eq!(settings.endpoint_kind, EndpointKind::Loopback);
@@ -979,56 +1132,32 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_llm_settings_remote_without_key() {
-        let cli = Cli {
-            workspace: "./test_workspace".to_string(),
-            model_name: Some("gpt-4o".to_string()),
-            api_url: Some("https://api.openai.com/v1".to_string()),
-            api_key: None,
-            search_api_key: None,
-            max_steps: 15,
-            task: None,
-            no_confirm: false,
-            no_egress_guard: false,
-            no_sandbox: true,
-            sandbox_no_network: false,
-            tool_timeout: 30,
-            enable_inbound: false,
-            inbound_port: 9876,
-            inbound_bind: "127.0.0.1".to_string(),
-            inbound_api_key: None,
-            update: false,
-        };
+    fn test_resolve_llm_settings_from_config_remote_without_key() {
+        let cli = make_test_cli(
+            Some("https://api.openai.com/v1"),
+            Some("gpt-4o"),
+            None,
+        );
 
-        let result = resolve_llm_settings(&cli);
+        let config = Config::default();
+
+        let result = resolve_llm_settings_from_config(&cli, &config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("API key is required for remote endpoints"));
     }
 
     #[test]
-    fn test_resolve_llm_settings_remote_with_key() {
-        let cli = Cli {
-            workspace: "./test_workspace".to_string(),
-            model_name: Some("gpt-4o".to_string()),
-            api_url: Some("https://api.openai.com/v1".to_string()),
-            api_key: Some("sk-test-key".to_string()),
-            search_api_key: None,
-            max_steps: 15,
-            task: None,
-            no_confirm: false,
-            no_egress_guard: false,
-            no_sandbox: true,
-            sandbox_no_network: false,
-            tool_timeout: 30,
-            enable_inbound: false,
-            inbound_port: 9876,
-            inbound_bind: "127.0.0.1".to_string(),
-            inbound_api_key: None,
-            update: false,
-        };
+    fn test_resolve_llm_settings_from_config_remote_with_key() {
+        let cli = make_test_cli(
+            Some("https://api.openai.com/v1"),
+            Some("gpt-4o"),
+            Some("sk-test-key"),
+        );
 
-        let result = resolve_llm_settings(&cli);
+        let config = Config::default();
+
+        let result = resolve_llm_settings_from_config(&cli, &config);
         assert!(result.is_ok());
         let settings = result.unwrap();
         assert_eq!(settings.endpoint_kind, EndpointKind::Remote);
@@ -1036,28 +1165,16 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_llm_settings_empty_model_name() {
-        let cli = Cli {
-            workspace: "./test_workspace".to_string(),
-            model_name: Some("   ".to_string()),
-            api_url: Some("http://localhost:11434/v1".to_string()),
-            api_key: None,
-            search_api_key: None,
-            max_steps: 15,
-            task: None,
-            no_confirm: false,
-            no_egress_guard: false,
-            no_sandbox: true,
-            sandbox_no_network: false,
-            tool_timeout: 30,
-            enable_inbound: false,
-            inbound_port: 9876,
-            inbound_bind: "127.0.0.1".to_string(),
-            inbound_api_key: None,
-            update: false,
-        };
+    fn test_resolve_llm_settings_from_config_empty_model_name() {
+        let cli = make_test_cli(
+            Some("http://localhost:11434/v1"),
+            Some("   "),
+            None,
+        );
 
-        let result = resolve_llm_settings(&cli);
+        let config = Config::default();
+
+        let result = resolve_llm_settings_from_config(&cli, &config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("--model-name cannot be empty"));

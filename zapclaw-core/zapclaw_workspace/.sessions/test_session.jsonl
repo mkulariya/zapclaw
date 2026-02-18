@@ -1,0 +1,253 @@
+{"timestamp":"2026-02-17T17:11:54.411434684+00:00","role":"header","content":"Session test_session started"}
+{"timestamp":"2026-02-17T17:11:54.413790063+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T17:11:54.413955187+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:11:54.414116809+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' was denied confirmation. Set up an interactive session or override --no-confirm (not recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:11:54.414307278+00:00","role":"assistant","content":"Done."}
+{"timestamp":"2026-02-17T17:11:54.417774067+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T17:11:54.418032841+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:11:54.418279737+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:11:54.418592527+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T17:13:58.505258333+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T17:13:58.505462620+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:13:58.505635494+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:13:58.505829336+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T17:13:58.521276237+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T17:13:58.521501073+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:13:58.521666719+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' was denied confirmation. Set up an interactive session or override --no-confirm (not recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:13:58.521894266+00:00","role":"assistant","content":"Done."}
+{"timestamp":"2026-02-17T17:14:16.807780002+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T17:14:16.808137699+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:14:16.808387178+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' was denied confirmation. Set up an interactive session or override --no-confirm (not recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:14:16.808830985+00:00","role":"assistant","content":"Done."}
+{"timestamp":"2026-02-17T17:14:35.956237028+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T17:14:35.956486528+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:14:35.956696711+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' was denied confirmation. Set up an interactive session or override --no-confirm (not recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:14:35.957002906+00:00","role":"assistant","content":"I cannot perform that action as it was denied"}
+{"timestamp":"2026-02-17T17:14:55.170183601+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T17:14:55.173639878+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:14:55.174440558+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' was denied confirmation. Set up an interactive session or override --no-confirm (not recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:14:55.176911728+00:00","role":"assistant","content":"I cannot perform that action as it was denied"}
+{"timestamp":"2026-02-17T17:14:55.245955832+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T17:14:55.246344464+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:14:55.246588843+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:14:55.246975515+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T17:52:50.008687717+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T17:52:50.008981401+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:52:50.009160938+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:52:50.009225279+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T17:52:50.009468660+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T17:52:50.009597852+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:52:50.009956391+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:52:50.010419123+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T17:53:27.529404247+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T17:53:27.529818058+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:53:27.530056851+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:53:27.530496474+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T17:53:27.665464928+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T17:53:27.665921210+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:53:27.666175680+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:53:27.666715729+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T17:54:31.223611059+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T17:54:31.223935199+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:54:31.224104787+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:54:31.224446582+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T17:54:31.253182957+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T17:54:31.253477611+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T17:54:31.253643562+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T17:54:31.253963825+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T18:03:48.425445887+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T18:03:48.425445400+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T18:03:48.426012881+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T18:03:48.426295382+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T18:03:48.426887963+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T18:03:48.428432711+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T18:03:48.429630060+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T18:03:48.430233968+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T18:23:25.998513689+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T18:23:26.000084958+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T18:23:26.001365426+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T18:23:26.003197296+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T18:23:26.038585129+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T18:23:26.040065341+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T18:23:26.041267579+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T18:23:26.042873988+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T18:26:22.974298508+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T18:26:22.976678268+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T18:26:22.977929404+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T18:26:22.980359388+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T18:26:23.015857645+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T18:26:23.016241589+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T18:26:23.016421315+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T18:26:23.017028377+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T19:09:36.159977009+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T19:09:36.160524996+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T19:09:36.160890920+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T19:09:36.161544157+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T19:09:36.192378169+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T19:09:36.193963282+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T19:09:36.195195+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T19:09:36.197036025+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T19:09:36.603312635+00:00","role":"user","content":"search for rust tutorials"}
+{"timestamp":"2026-02-17T19:09:36.603902909+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"rust programming language tutorial\"}"}}]}
+{"timestamp":"2026-02-17T19:09:36.606039161+00:00","role":"tool","content":"Error: Tool 'web_search' requires confirmation but no interactive terminal is available.","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:09:36.606725989+00:00","role":"assistant","content":"Here are some rust programming resources..."}
+{"timestamp":"2026-02-17T19:09:36.618967388+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-17T19:09:36.619364946+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T19:09:36.624557585+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:09:36.625372679+00:00","role":"assistant","content":"Search failed due to blocked request."}
+{"timestamp":"2026-02-17T19:09:36.644936651+00:00","role":"user","content":"search with secret (egress guard disabled)"}
+{"timestamp":"2026-02-17T19:09:36.645575854+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T19:09:36.645857475+00:00","role":"tool","content":"Error: Tool 'web_search' requires confirmation but no interactive terminal is available.","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:09:36.646628835+00:00","role":"assistant","content":"Search executed (egress guard disabled)."}
+{"timestamp":"2026-02-17T19:09:36.666830666+00:00","role":"user","content":"browse url with token"}
+{"timestamp":"2026-02-17T19:09:36.667286896+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"browse_url","arguments":"{\"url\": \"https://example.com?token=abc123def456789\"}"}}]}
+{"timestamp":"2026-02-17T19:09:36.670364366+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: browse_url request rejected due to high-risk signals:\n  URL contains secret-bearing param (token/api_key/secret/password/auth)\n  Preview: https://example.com?token=abc123def456789","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:09:36.670881416+00:00","role":"assistant","content":"Browse failed due to blocked request."}
+{"timestamp":"2026-02-17T19:10:00.686050299+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-17T19:10:00.686671401+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T19:10:00.692389578+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:10:00.693195135+00:00","role":"assistant","content":"Search failed due to blocked request."}
+{"timestamp":"2026-02-17T19:11:06.184181546+00:00","role":"user","content":"browse url with token"}
+{"timestamp":"2026-02-17T19:11:06.184675530+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"browse_url","arguments":"{\"url\": \"https://example.com?token=abc123def456789\"}"}}]}
+{"timestamp":"2026-02-17T19:11:06.187563854+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: browse_url request rejected due to high-risk signals:\n  URL contains secret-bearing param (token/api_key/secret/password/auth)\n  Preview: https://example.com?token=abc123def456789","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:11:06.188091737+00:00","role":"assistant","content":"Browse failed due to blocked request."}
+{"timestamp":"2026-02-17T19:11:06.190410845+00:00","role":"user","content":"search with secret (egress guard disabled)"}
+{"timestamp":"2026-02-17T19:11:06.190832190+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T19:11:06.191036257+00:00","role":"tool","content":"Error: Tool 'web_search' requires confirmation but no interactive terminal is available.","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:11:06.191813346+00:00","role":"assistant","content":"Search executed (egress guard disabled)."}
+{"timestamp":"2026-02-17T19:11:06.246567605+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-17T19:11:06.247207150+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T19:11:06.252653121+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:11:06.253505020+00:00","role":"assistant","content":"Search failed due to blocked request."}
+{"timestamp":"2026-02-17T19:11:06.271392260+00:00","role":"user","content":"search for rust tutorials"}
+{"timestamp":"2026-02-17T19:11:06.271839342+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"rust programming language tutorial\"}"}}]}
+{"timestamp":"2026-02-17T19:11:06.273460021+00:00","role":"tool","content":"Error: Tool 'web_search' requires confirmation but no interactive terminal is available.","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:11:06.273970231+00:00","role":"assistant","content":"Here are some rust programming resources..."}
+{"timestamp":"2026-02-17T19:16:16.942180928+00:00","role":"user","content":"search with secret (egress guard disabled)"}
+{"timestamp":"2026-02-17T19:16:16.944467356+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T19:16:16.945777553+00:00","role":"tool","content":"Search results","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:16:16.947617130+00:00","role":"assistant","content":"Search executed (egress guard disabled)."}
+{"timestamp":"2026-02-17T19:16:17.118457719+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-17T19:16:17.120201160+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T19:16:17.129125309+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:16:17.131140729+00:00","role":"assistant","content":"Search failed due to blocked request."}
+{"timestamp":"2026-02-17T19:16:17.213477465+00:00","role":"user","content":"browse url with token"}
+{"timestamp":"2026-02-17T19:16:17.214280307+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"browse_url","arguments":"{\"url\": \"https://example.com?token=abc123def456789\"}"}}]}
+{"timestamp":"2026-02-17T19:16:17.219515961+00:00","role":"user","content":"search for rust tutorials"}
+{"timestamp":"2026-02-17T19:16:17.221308420+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"rust programming language tutorial\"}"}}]}
+{"timestamp":"2026-02-17T19:16:17.224830253+00:00","role":"tool","content":"Search results for rust programming","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:16:17.225596909+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: browse_url request rejected due to high-risk signals:\n  URL contains secret-bearing param (token/api_key/secret/password/auth)\n  Preview: https://example.com?token=abc123def456789","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T19:16:17.226653640+00:00","role":"assistant","content":"Browse failed due to blocked request."}
+{"timestamp":"2026-02-17T19:16:17.228198709+00:00","role":"assistant","content":"Here are some rust programming resources..."}
+{"timestamp":"2026-02-17T20:16:30.990818841+00:00","role":"user","content":"search with secret (egress guard disabled)"}
+{"timestamp":"2026-02-17T20:16:30.992385246+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T20:16:30.993447157+00:00","role":"tool","content":"Search results","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T20:16:30.995033594+00:00","role":"assistant","content":"Search executed (egress guard disabled)."}
+{"timestamp":"2026-02-17T20:16:31.039828721+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-17T20:16:31.040684454+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T20:16:31.048969610+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T20:16:31.050018830+00:00","role":"assistant","content":"Search failed due to blocked request."}
+{"timestamp":"2026-02-17T20:16:31.081153616+00:00","role":"user","content":"search for rust tutorials"}
+{"timestamp":"2026-02-17T20:16:31.082046989+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"rust programming language tutorial\"}"}}]}
+{"timestamp":"2026-02-17T20:16:31.084862087+00:00","role":"tool","content":"Search results for rust programming","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T20:16:31.085939545+00:00","role":"assistant","content":"Here are some rust programming resources..."}
+{"timestamp":"2026-02-17T20:16:31.098267800+00:00","role":"user","content":"browse url with token"}
+{"timestamp":"2026-02-17T20:16:31.099098686+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"browse_url","arguments":"{\"url\": \"https://example.com?token=abc123def456789\"}"}}]}
+{"timestamp":"2026-02-17T20:16:31.117319186+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: browse_url request rejected due to high-risk signals:\n  URL contains secret-bearing param (token/api_key/secret/password/auth)\n  Preview: https://example.com?token=abc123def456789","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T20:16:31.118404246+00:00","role":"assistant","content":"Browse failed due to blocked request."}
+{"timestamp":"2026-02-17T20:18:11.461248470+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T20:18:11.462063751+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T20:18:11.462360765+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T20:18:11.463326577+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T20:18:11.474341728+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T20:18:11.475174497+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T20:18:11.475402993+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T20:18:11.476459108+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T20:18:11.754415265+00:00","role":"user","content":"search for rust tutorials"}
+{"timestamp":"2026-02-17T20:18:11.755283315+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"rust programming language tutorial\"}"}}]}
+{"timestamp":"2026-02-17T20:18:11.757840016+00:00","role":"tool","content":"Search results for rust programming","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T20:18:11.758908133+00:00","role":"assistant","content":"Here are some rust programming resources..."}
+{"timestamp":"2026-02-17T20:18:11.911178564+00:00","role":"user","content":"search with secret (egress guard disabled)"}
+{"timestamp":"2026-02-17T20:18:11.913085063+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T20:18:11.914294860+00:00","role":"tool","content":"Search results","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T20:18:11.916394511+00:00","role":"assistant","content":"Search executed (egress guard disabled)."}
+{"timestamp":"2026-02-17T20:18:11.958254561+00:00","role":"user","content":"browse url with token"}
+{"timestamp":"2026-02-17T20:18:11.959148257+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"browse_url","arguments":"{\"url\": \"https://example.com?token=abc123def456789\"}"}}]}
+{"timestamp":"2026-02-17T20:18:11.978251285+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: browse_url request rejected due to high-risk signals:\n  URL contains secret-bearing param (token/api_key/secret/password/auth)\n  Preview: https://example.com?token=abc123def456789","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T20:18:11.979079645+00:00","role":"assistant","content":"Browse failed due to blocked request."}
+{"timestamp":"2026-02-17T20:18:12.008303544+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-17T20:18:12.009232347+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T20:18:12.017740114+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T20:18:12.018893689+00:00","role":"assistant","content":"Search failed due to blocked request."}
+{"timestamp":"2026-02-17T21:07:58.032107427+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T21:07:58.033993131+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T21:07:58.035209351+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T21:07:58.037283602+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T21:07:58.055856893+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T21:07:58.061289618+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T21:07:58.062312559+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T21:07:58.064051992+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T21:07:58.525036224+00:00","role":"user","content":"search for rust tutorials"}
+{"timestamp":"2026-02-17T21:07:58.526909845+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"rust programming language tutorial\"}"}}]}
+{"timestamp":"2026-02-17T21:07:58.530328932+00:00","role":"tool","content":"Search results for rust programming","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T21:07:58.532357590+00:00","role":"assistant","content":"Here are some rust programming resources..."}
+{"timestamp":"2026-02-17T21:07:58.560795824+00:00","role":"user","content":"search with secret (egress guard disabled)"}
+{"timestamp":"2026-02-17T21:07:58.561787805+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T21:07:58.562063155+00:00","role":"tool","content":"Search results","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T21:07:58.563252240+00:00","role":"assistant","content":"Search executed (egress guard disabled)."}
+{"timestamp":"2026-02-17T21:07:58.581751811+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-17T21:07:58.582698843+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T21:07:58.587979951+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T21:07:58.589145349+00:00","role":"assistant","content":"Search failed due to blocked request."}
+{"timestamp":"2026-02-17T21:07:58.593724842+00:00","role":"user","content":"browse url with token"}
+{"timestamp":"2026-02-17T21:07:58.594313222+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"browse_url","arguments":"{\"url\": \"https://example.com?token=abc123def456789\"}"}}]}
+{"timestamp":"2026-02-17T21:07:58.609206377+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: browse_url request rejected due to high-risk signals:\n  URL contains secret-bearing param (token/api_key/secret/password/auth)\n  Preview: https://example.com?token=abc123def456789","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T21:07:58.610022691+00:00","role":"assistant","content":"Browse failed due to blocked request."}
+{"timestamp":"2026-02-17T21:18:38.208602283+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-17T21:18:38.210797878+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T21:18:38.211159209+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T21:18:38.212340067+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-17T21:18:38.240122610+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-17T21:18:38.241204125+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-17T21:18:38.241530682+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-17T21:18:38.242796917+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-17T21:18:38.501887502+00:00","role":"user","content":"search for rust tutorials"}
+{"timestamp":"2026-02-17T21:18:38.503700491+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"rust programming language tutorial\"}"}}]}
+{"timestamp":"2026-02-17T21:18:38.507273482+00:00","role":"tool","content":"Search results for rust programming","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T21:18:38.509410268+00:00","role":"assistant","content":"Here are some rust programming resources..."}
+{"timestamp":"2026-02-17T21:18:38.563483002+00:00","role":"user","content":"browse url with token"}
+{"timestamp":"2026-02-17T21:18:38.564129275+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"browse_url","arguments":"{\"url\": \"https://example.com?token=abc123def456789\"}"}}]}
+{"timestamp":"2026-02-17T21:18:38.580906526+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: browse_url request rejected due to high-risk signals:\n  URL contains secret-bearing param (token/api_key/secret/password/auth)\n  Preview: https://example.com?token=abc123def456789","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T21:18:38.581779087+00:00","role":"assistant","content":"Browse failed due to blocked request."}
+{"timestamp":"2026-02-17T21:18:38.644282218+00:00","role":"user","content":"search with secret (egress guard disabled)"}
+{"timestamp":"2026-02-17T21:18:38.645082098+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T21:18:38.645307882+00:00","role":"tool","content":"Search results","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T21:18:38.646440258+00:00","role":"assistant","content":"Search executed (egress guard disabled)."}
+{"timestamp":"2026-02-17T21:18:38.724296078+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-17T21:18:38.725220560+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-17T21:18:38.731622254+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-17T21:18:38.732527188+00:00","role":"assistant","content":"Search failed due to blocked request."}
+{"timestamp":"2026-02-18T18:05:34.619958944+00:00","role":"user","content":"run safe tool"}
+{"timestamp":"2026-02-18T18:05:34.622225651+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"safe_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-18T18:05:34.624537669+00:00","role":"tool","content":"safe operation complete","tool_call_id":"call1"}
+{"timestamp":"2026-02-18T18:05:34.631575471+00:00","role":"assistant","content":"Task complete"}
+{"timestamp":"2026-02-18T18:05:34.738935227+00:00","role":"user","content":"run dangerous tool"}
+{"timestamp":"2026-02-18T18:05:34.741743902+00:00","role":"assistant","content":"","tool_calls":[{"id":"call1","type":"function","function":{"name":"dangerous_tool","arguments":"{}"}}]}
+{"timestamp":"2026-02-18T18:05:34.742860606+00:00","role":"tool","content":"Error: Tool 'dangerous_tool' requires confirmation and cannot run in headless/inbound mode. Use --no-confirm to disable confirmation (NOT recommended).","tool_call_id":"call1"}
+{"timestamp":"2026-02-18T18:05:34.744921341+00:00","role":"assistant","content":"Tool was denied"}
+{"timestamp":"2026-02-18T18:05:35.039724004+00:00","role":"user","content":"browse url with token"}
+{"timestamp":"2026-02-18T18:05:35.041759005+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"browse_url","arguments":"{\"url\": \"https://example.com?token=abc123def456789\"}"}}]}
+{"timestamp":"2026-02-18T18:05:35.064470219+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: browse_url request rejected due to high-risk signals:\n  URL contains secret-bearing param (token/api_key/secret/password/auth)\n  Preview: https://example.com?token=abc123def456789","tool_call_id":"call_1"}
+{"timestamp":"2026-02-18T18:05:35.066852674+00:00","role":"assistant","content":"Browse failed due to blocked request."}
+{"timestamp":"2026-02-18T18:05:35.143971430+00:00","role":"user","content":"search for rust tutorials"}
+{"timestamp":"2026-02-18T18:05:35.145107954+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"rust programming language tutorial\"}"}}]}
+{"timestamp":"2026-02-18T18:05:35.148270595+00:00","role":"tool","content":"Search results for rust programming","tool_call_id":"call_1"}
+{"timestamp":"2026-02-18T18:05:35.149747096+00:00","role":"assistant","content":"Here are some rust programming resources..."}
+{"timestamp":"2026-02-18T18:05:35.168345636+00:00","role":"user","content":"search with secret (egress guard disabled)"}
+{"timestamp":"2026-02-18T18:05:35.169782426+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-18T18:05:35.170131290+00:00","role":"tool","content":"Search results","tool_call_id":"call_1"}
+{"timestamp":"2026-02-18T18:05:35.171649684+00:00","role":"assistant","content":"Search executed (egress guard disabled)."}
+{"timestamp":"2026-02-18T18:05:35.182714656+00:00","role":"user","content":"search for my api key"}
+{"timestamp":"2026-02-18T18:05:35.183988089+00:00","role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"query\": \"my api key is sk-1234567890abcdefghijklmnop\"}"}}]}
+{"timestamp":"2026-02-18T18:05:35.191336533+00:00","role":"tool","content":"Error: 🚫 EGRESS BLOCKED: web_search request rejected due to high-risk signals:\n  Query contains API key pattern\n  Preview: my api key is sk-1234567890abcdefghijklmnop","tool_call_id":"call_1"}
+{"timestamp":"2026-02-18T18:05:35.192480820+00:00","role":"assistant","content":"Search failed due to blocked request."}

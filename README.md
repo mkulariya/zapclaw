@@ -58,13 +58,18 @@ That's it. Now `zapclaw` is available as a command from anywhere. It automatical
 ### Run
 
 ```bash
-# Interactive REPL (requires explicit endpoint configuration)
-zapclaw --api-url http://localhost:11434/v1 --model-name phi3:mini
+# Interactive REPL (auto-creates home config on first run)
+zapclaw
 
-# Single task
+# Using project config (optional override)
+zapclaw --init-config  # Creates ./zapclaw.json in current directory
+# Edit ./zapclaw.json to override home config values
+zapclaw
+
+# Single task with CLI flags
 zapclaw --api-url http://localhost:11434/v1 --model-name phi3:mini --task "What is sqrt(144) + 3^2?"
 
-# Using environment variables
+# Using environment variables (highest precedence)
 export ZAPCLAW_API_BASE_URL="http://localhost:11434/v1"
 export ZAPCLAW_MODEL="phi3:mini"
 zapclaw
@@ -138,7 +143,58 @@ The browser tool blocks all private/local network addresses:
 - RFC 1918 ranges: `10.x.x.x`, `172.16-31.x.x`, `192.168.x.x`
 - Link-local: `169.254.x.x`
 
-## CLI Options
+## Configuration
+
+ZapClaw uses a layered configuration system with automatic home config creation:
+
+### Config File Locations
+
+1. **Home config** (default, auto-created): `~/.zapclaw/zapclaw.json`
+   - Automatically created on first run with safe defaults
+   - Contains your personal preferences
+   - Used everywhere unless explicitly overridden
+
+2. **Project config** (optional override): `./zapclaw.json`
+   - Created manually with `zapclaw --init-config`
+   - Overrides home config values when present
+   - Useful for project-specific settings
+
+3. **Explicit path** (bypasses discovery): `--config <path>` or `ZAPCLAW_CONFIG_PATH`
+   - Uses only the specified file
+   - No home/project discovery
+
+### Precedence Order
+
+From lowest to highest priority:
+1. **Built-in defaults**
+2. **Home config** (~/.zapclaw/zapclaw.json)
+3. **Project config** (./zapclaw.json, if exists)
+4. **Environment variables**
+5. **CLI flags** (highest priority)
+
+### Config File Format
+
+Home config is auto-created with this template:
+
+```json
+{
+  "workspace_path": "./zapclaw_workspace",
+  "api_base_url": "http://localhost:11434/v1",
+  "model_name": "phi3:mini",
+  "max_steps": 15,
+  "tool_timeout_secs": 30,
+  "require_confirmation": true,
+  "enable_egress_guard": true,
+  "context_window_tokens": 128000
+}
+```
+
+**Important:** API keys are NEVER stored in config files. Set them via environment variables:
+- `ZAPCLAW_API_KEY` - LLM API key (required for non-localhost endpoints)
+- `ZAPCLAW_SEARCH_API_KEY` - Web search API key (optional, for Brave Search)
+- `ZAPCLAW_INBOUND_KEY` - Inbound tunnel API key (for remote access)
+
+### CLI Options
 
 ```
 ZapClaw 🦞 — Secure, lightweight AI agent
@@ -146,18 +202,21 @@ ZapClaw 🦞 — Secure, lightweight AI agent
 Usage: zapclaw [OPTIONS]
 
 Options:
-  -w, --workspace <DIR>      Workspace directory [default: ./zapclaw_workspace]
-  -n, --model-name <NAME>    Model name [env: ZAPCLAW_MODEL] (required)
-      --api-url <URL>        API base URL [env: ZAPCLAW_API_BASE_URL] (required)
-      --api-key <KEY>        API key [env: ZAPCLAW_API_KEY] (required for remote endpoints)
-      --max-steps <N>        Max agent steps per task [default: 15]
-  -t, --task <TASK>          Run single task and exit
-      --no-confirm           Disable confirmation prompts
-      --no-sandbox           Skip bubblewrap sandbox (dev only)
-      --sandbox-no-network   Disable network inside sandbox
-      --enable-inbound       Enable remote JSON-RPC server
-      --inbound-port <PORT>  Inbound server port [default: 9876]
-      --inbound-bind <ADDR>  Bind address [default: 127.0.0.1]
+  -c, --config <PATH>       Config file path (disables home+project discovery)
+      --init-config         Create project config file template (./zapclaw.json) and exit
+      --print-effective-config  Print merged configuration and exit
+  -w, --workspace <DIR>     Workspace directory
+  -n, --model-name <NAME>   Model name [env: ZAPCLAW_MODEL] (required)
+      --api-url <URL>       API base URL [env: ZAPCLAW_API_BASE_URL] (required)
+      --api-key <KEY>       API key [env: ZAPCLAW_API_KEY] (required for remote endpoints)
+      --max-steps <N>       Max agent steps per task [default: 15]
+  -t, --task <TASK>         Run single task and exit
+      --no-confirm          Disable confirmation prompts
+      --no-sandbox          Skip bubblewrap sandbox (dev only)
+      --sandbox-no-network  Disable network inside sandbox
+      --enable-inbound      Enable remote JSON-RPC server
+      --inbound-port <PORT> Inbound server port [default: 9876]
+      --inbound-bind <ADDR> Bind address [default: 127.0.0.1]
       --inbound-api-key <KEY> API key for remote auth [env: ZAPCLAW_INBOUND_KEY]
   -h, --help                 Print help
   -V, --version              Print version
