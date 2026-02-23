@@ -640,16 +640,44 @@ async fn main() -> Result<()> {
         OpenAiCompatibleClient::new(&config.api_base_url, &config.model_name, api_key.clone())
     );
 
-    // File-based memory (no SQLite)
+    // File-based memory with SQLite indexing
     let memory = Arc::new(
         MemoryDb::new(&workspace)
             .context("Failed to initialize memory")?
     );
 
+    // Validate memory configuration (security check)
+    config.validate_memory_config()
+        .map_err(|e| anyhow::anyhow!("Memory configuration validation failed: {}", e))?;
+
+    // Start memory daemon if enabled
+    let daemon_handle = if config.memory_daemon_enabled {
+        log::info!("Starting memory daemon...");
+        let daemon = zapclaw_core::memory_daemon::MemoryDaemon::start(
+            &workspace,
+            &config,
+            memory.clone(),
+        ).await
+        .context("Failed to start memory daemon")?;
+
+        // Create embedding provider for memory tools
+        let provider = Arc::new(zapclaw_core::memory::EmbeddingProvider::new(
+            &config.memory_embedding_base_url,
+            &config.memory_embedding_model,
+            None, // no API key for local Ollama
+            config.memory_embedding_target_dims,
+        ));
+
+        Some((daemon, provider))
+    } else {
+        log::info!("Memory daemon disabled by config");
+        None
+    };
+
     let confiner = Confiner::new(&workspace)
         .context("Failed to initialize workspace confiner")?;
 
-    // Register all 14 tools
+    // Register all tools
     let mut tools = ToolRegistry::new();
 
     // Core developer tools
@@ -660,8 +688,32 @@ async fn main() -> Result<()> {
     tools.register(Arc::new(FindTool::new(confiner.clone())));
     tools.register(Arc::new(PatchTool::new(confiner.clone())));
 
-    // Memory tools
-    tools.register(Arc::new(MemorySearchTool::new(memory.clone())));
+    // Memory tools - use hybrid search only if daemon can use embeddings
+    // This respects allow_lexical_fallback: checks both existing embeddings AND Ollama reachability
+    let use_hybrid_search = if let Some((ref daemon, _)) = daemon_handle {
+        daemon.can_use_embeddings()
+    } else {
+        false
+    };
+
+    if use_hybrid_search {
+        if let Some((_, ref provider)) = daemon_handle {
+            tools.register(Arc::new(
+                zapclaw_tools::memory_tool::MemorySearchTool::with_provider(
+                    memory.clone(),
+                    provider.clone(),
+                    config.memory_sync_on_search,
+                    config.memory_require_embeddings,
+                )
+            ));
+        }
+    } else {
+        // Lexical-only mode (either daemon disabled, no embeddings, or Ollama down with fallback allowed)
+        log::info!("Memory search running in lexical-only mode (hybrid search disabled)");
+        tools.register(Arc::new(
+            zapclaw_tools::memory_tool::MemorySearchTool::new(memory.clone())
+        ));
+    }
     tools.register(Arc::new(MemoryGetTool::new(memory.clone())));
 
     // Background process manager
@@ -677,17 +729,20 @@ async fn main() -> Result<()> {
         api_key,
     )));
 
-    // Session status
-    tools.register(Arc::new(SessionTool::new(
-        memory.clone(),
-        &config.model_name,
-        vec![
-            ("phi".to_string(), "phi3:mini".to_string()),
-            ("gpt4".to_string(), "gpt-4o".to_string()),
-            ("claude".to_string(), "claude-3.5-sonnet".to_string()),
-            ("llama".to_string(), "llama3.1:8b".to_string()),
-        ],
-    )));
+    // Session status (with LLM for compaction)
+    tools.register(Arc::new(
+        SessionTool::new(
+            memory.clone(),
+            &config.model_name,
+            vec![
+                ("phi".to_string(), "phi3:mini".to_string()),
+                ("gpt4".to_string(), "gpt-4o".to_string()),
+                ("claude".to_string(), "claude-3.5-sonnet".to_string()),
+                ("llama".to_string(), "llama3.1:8b".to_string()),
+            ],
+        )
+        .with_llm(llm.clone())
+    ));
 
     // Utility tools
     tools.register(Arc::new(MathTool::new()));
@@ -750,6 +805,15 @@ async fn main() -> Result<()> {
     if let Some(task) = cli.task {
         let response = run_with_streaming(&agent, &session_id, &task).await?;
         println!("\n{}", extract_final_response(&response));
+
+        // Shutdown memory daemon if running
+        if let Some((daemon, _)) = daemon_handle {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                daemon.shutdown(),
+            ).await;
+        }
+
         return Ok(());
     }
 
@@ -958,6 +1022,16 @@ async fn main() -> Result<()> {
 
     // Graceful shutdown: stop all background loops
     let _ = shutdown_tx.send(true);
+
+    // Shutdown memory daemon if running
+    if let Some((daemon, _)) = daemon_handle {
+        log::info!("Shutting down memory daemon...");
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            daemon.shutdown(),
+        ).await;
+    }
+
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         cron_handle,

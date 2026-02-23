@@ -231,7 +231,7 @@ fn test_memory_multi_session() {
     }
 
     // Sync to index the stored content
-    db.sync("test-model").unwrap();
+    db.sync("test-model", 512).unwrap();
 
     // Retrieve all entries — file-based memory stores in date files
     let entries = db.retrieve("any-session").unwrap();
@@ -360,11 +360,11 @@ fn test_sync_with_options_force_reindex() {
     db.store("s1", "user", "initial content").unwrap();
 
     // First sync
-    let count1 = db.sync("test-model").unwrap();
+    let count1 = db.sync("test-model", 512).unwrap();
     assert!(count1 > 0);
 
     // Normal sync should skip (hash unchanged)
-    let count2 = db.sync("test-model").unwrap();
+    let count2 = db.sync("test-model", 512).unwrap();
     assert_eq!(count2, 0);
 
     // Force reindex should re-process all files
@@ -401,7 +401,7 @@ fn test_compaction_metadata() {
 fn test_search_result_metadata() {
     let db = MemoryDb::in_memory().unwrap();
     db.store("s1", "user", "The sky is blue and beautiful").unwrap();
-    db.sync("test-model").unwrap();
+    db.sync("test-model", 512).unwrap();
 
     let results = db.search("sky blue", 5, 0.0).unwrap();
     assert!(!results.is_empty());

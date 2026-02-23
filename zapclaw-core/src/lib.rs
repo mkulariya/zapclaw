@@ -1,9 +1,10 @@
 pub mod agent;
 pub mod confiner;
-pub mod egress_guard;
 pub mod config;
+pub mod egress_guard;
 pub mod llm;
 pub mod memory;
+pub mod memory_daemon;
 pub mod sandbox;
 pub mod sanitizer;
 pub mod session;

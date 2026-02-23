@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use zapclaw_core::agent::Tool;
-use zapclaw_core::memory::MemoryDb;
+use zapclaw_core::memory::{MemoryDb, EmbeddingProvider};
 
 /// Memory search tool — semantically search MEMORY.md + memory/*.md.
 ///
@@ -13,6 +13,12 @@ use zapclaw_core::memory::MemoryDb;
 pub struct MemorySearchTool {
     memory: Arc<MemoryDb>,
     disabled: bool,
+    /// Optional embedding provider for hybrid search
+    embedding_provider: Option<Arc<EmbeddingProvider>>,
+    /// Sync before search (if true and provider available)
+    sync_on_search: bool,
+    /// Require embeddings (strict mode: fail instead of degrading to lexical)
+    require_embeddings: bool,
 }
 
 #[derive(Deserialize)]
@@ -28,12 +34,35 @@ fn default_max_results() -> usize { 10 }
 
 impl MemorySearchTool {
     pub fn new(memory: Arc<MemoryDb>) -> Self {
-        Self { memory, disabled: false }
+        Self {
+            memory,
+            disabled: false,
+            embedding_provider: None,
+            sync_on_search: false,
+            require_embeddings: false,
+        }
+    }
+
+    /// Create with embedding provider for hybrid search
+    pub fn with_provider(memory: Arc<MemoryDb>, provider: Arc<EmbeddingProvider>, sync_on_search: bool, require_embeddings: bool) -> Self {
+        Self {
+            memory,
+            disabled: false,
+            embedding_provider: Some(provider),
+            sync_on_search,
+            require_embeddings,
+        }
     }
 
     /// Create a disabled memory search tool (matching OpenClaw's disabled state).
     pub fn new_disabled(memory: Arc<MemoryDb>) -> Self {
-        Self { memory, disabled: true }
+        Self {
+            memory,
+            disabled: true,
+            embedding_provider: None,
+            sync_on_search: false,
+            require_embeddings: false,
+        }
     }
 }
 
@@ -78,7 +107,23 @@ impl Tool for MemorySearchTool {
         let args: MemorySearchArgs = serde_json::from_str(args_json)
             .context("Invalid memory_search arguments")?;
 
-        let results = self.memory.search(&args.query, args.max_results, args.min_score)?;
+        // Use hybrid search if provider available, otherwise fall back to lexical-only
+        let results = if let Some(ref provider) = self.embedding_provider {
+            // Sync before search if configured (only if we have a provider)
+            // Note: This is a lightweight sync - full embedding is done by daemon
+            if self.sync_on_search {
+                if let Err(e) = self.memory.sync(&provider.model(), provider.target_dims()) {
+                    log::warn!("Memory sync before search failed: {}", e);
+                }
+            }
+
+            // Use hybrid search with embeddings
+            // Note: Daemon handles periodic sync automatically (every sync_interval_secs)
+            self.memory.search_hybrid(&args.query, args.max_results, args.min_score, provider, self.require_embeddings).await?
+        } else {
+            // Lexical-only fallback
+            self.memory.search(&args.query, args.max_results, args.min_score)?
+        };
 
         if results.is_empty() {
             return Ok("No memory results found for this query.".to_string());
@@ -190,5 +235,46 @@ mod tests {
         let mem = Arc::new(MemoryDb::in_memory().unwrap());
         let tool = MemoryGetTool::new(mem);
         assert_eq!(tool.name(), "memory_get");
+    }
+
+    #[test]
+    fn test_memory_search_tool_with_provider() {
+        let mem = Arc::new(MemoryDb::in_memory().unwrap());
+        let provider = Arc::new(EmbeddingProvider::new(
+            "http://localhost:11434/v1",
+            "test-model",
+            None,
+            512,
+        ));
+        let tool = MemorySearchTool::with_provider(mem, provider, true, false);
+        assert_eq!(tool.name(), "memory_search");
+        assert!(tool.embedding_provider.is_some());
+        assert!(tool.sync_on_search);
+    }
+
+    #[test]
+    fn test_memory_search_tool_disabled() {
+        let mem = Arc::new(MemoryDb::in_memory().unwrap());
+        let tool = MemorySearchTool::new_disabled(mem);
+        assert!(tool.disabled);
+    }
+
+    #[test]
+    fn test_memory_search_tool_strict_mode() {
+        let mem = Arc::new(MemoryDb::in_memory().unwrap());
+        let provider = Arc::new(EmbeddingProvider::new(
+            "http://localhost:11434/v1",
+            "test-model",
+            None,
+            512,
+        ));
+        
+        // Strict mode: require_embeddings=true
+        let tool_strict = MemorySearchTool::with_provider(mem.clone(), provider.clone(), false, true);
+        assert!(tool_strict.require_embeddings);
+        
+        // Non-strict mode: require_embeddings=false
+        let tool_fallback = MemorySearchTool::with_provider(mem.clone(), provider, false, false);
+        assert!(!tool_fallback.require_embeddings);
     }
 }

@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use zapclaw_core::agent::Tool;
+use zapclaw_core::llm::LlmClient;
 use zapclaw_core::memory::MemoryDb;
 
 /// Session info/status tool — show session information, usage, model info.
@@ -11,9 +12,10 @@ use zapclaw_core::memory::MemoryDb;
 /// Actions:
 ///   - status: Show current session stats (model, tokens, time)
 ///   - history: Retrieve conversation history
-///   - compact: Trigger manual compaction
+///   - compact: Trigger LLM-based compaction
 pub struct SessionTool {
     memory: Arc<MemoryDb>,
+    llm: Option<Arc<dyn LlmClient>>,
     model_name: String,
     model_aliases: Vec<(String, String)>,
     session_start: chrono::DateTime<chrono::Utc>,
@@ -34,10 +36,17 @@ impl SessionTool {
     pub fn new(memory: Arc<MemoryDb>, model_name: &str, model_aliases: Vec<(String, String)>) -> Self {
         Self {
             memory,
+            llm: None,
             model_name: model_name.to_string(),
             model_aliases,
             session_start: chrono::Utc::now(),
         }
+    }
+
+    /// Set LLM client for compaction
+    pub fn with_llm(mut self, llm: Arc<dyn LlmClient>) -> Self {
+        self.llm = Some(llm);
+        self
     }
 }
 
@@ -139,13 +148,18 @@ impl Tool for SessionTool {
 
             "compact" => {
                 let keep_days = args.keep_days.unwrap_or(7);
-                let result = self.memory.compact(keep_days)?;
+
+                // LLM-only compaction (no rule-based fallback)
+                let llm = self.llm.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("LLM client not available for compaction"))?;
+
+                let result = self.memory.compact_llm(&**llm, keep_days).await?;
 
                 if result.files_compacted == 0 {
                     Ok("Nothing to compact — memory is already lean.".to_string())
                 } else {
                     Ok(format!(
-                        "✅ Compacted {} files, freed ~{} chars (~{} tokens)",
+                        "✅ LLM-compacted {} files, freed ~{} chars (~{} tokens)",
                         result.files_compacted,
                         result.chars_freed,
                         result.chars_freed / 4

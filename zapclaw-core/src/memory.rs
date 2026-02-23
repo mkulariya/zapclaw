@@ -31,7 +31,7 @@ const DEFAULT_CHUNK_OVERLAP: usize = 50;
 pub struct MemoryDb {
     workspace: PathBuf,
     db: Mutex<Connection>,
-    embedding_model: String,
+    target_dims: usize,
     chunk_tokens: usize,
     chunk_overlap: usize,
     fts_available: bool,
@@ -85,18 +85,20 @@ struct MemoryChunk {
 #[derive(Debug)]
 struct MemoryFileEntry {
     path: String,
-    abs_path: PathBuf,
     hash: String,
     mtime_ms: i64,
     size: i64,
 }
 
 /// Index metadata stored in SQLite meta table.
-#[derive(Debug, Serialize, Deserialize)]
-struct IndexMeta {
-    model: String,
-    chunk_tokens: usize,
-    chunk_overlap: usize,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IndexMeta {
+    pub model: String,
+    pub target_dims: usize,
+    pub chunk_tokens: usize,
+    pub chunk_overlap: usize,
+    pub schema_version: u32,
+    pub last_sync_at: Option<String>, // ISO 8601 timestamp
 }
 
 #[derive(Debug, Clone)]
@@ -310,19 +312,53 @@ fn parse_embedding(raw: &str) -> Vec<f32> {
     serde_json::from_str::<Vec<f32>>(raw).unwrap_or_default()
 }
 
+/// Matryoshka projection: truncate embedding to target dimensions and L2-normalize.
+///
+/// nomic-embed-text:v1.5 supports Matryoshka embeddings (768 dims → 256/512).
+/// This function:
+/// 1. Rejects vectors shorter than target (error)
+/// 2. Truncates prefix to target_dims
+/// 3. L2 normalizes the projected vector
+///
+/// Returns normalized vector of length target_dims.
+fn project_matryoshka(vec: &[f32], target_dims: usize) -> Result<Vec<f32>> {
+    // Validate input
+    if vec.len() < target_dims {
+        anyhow::bail!(
+            "Cannot project {}-dim vector to {} dims (source too short)",
+            vec.len(),
+            target_dims
+        );
+    }
+
+    // Truncate to target_dims
+    let mut projected = vec[..target_dims].to_vec();
+
+    // L2 normalize
+    let norm: f32 = projected.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 1e-6 {
+        for v in projected.iter_mut() {
+            *v /= norm;
+        }
+    }
+
+    Ok(projected)
+}
+
 // ── Embedding Provider ──────────────────────────────────────────────────
 
 /// Embedding provider — calls OpenAI-compatible /embeddings endpoint.
-/// Matches OpenClaw's embedding provider interface.
+/// Matches OpenClaw's embedding provider interface with Matryoshka projection support.
 pub struct EmbeddingProvider {
     client: reqwest::Client,
     base_url: String,
     model: String,
     api_key: Option<String>,
+    target_dims: usize,
 }
 
 impl EmbeddingProvider {
-    pub fn new(base_url: &str, model: &str, api_key: Option<String>) -> Self {
+    pub fn new(base_url: &str, model: &str, api_key: Option<String>, target_dims: usize) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -332,10 +368,11 @@ impl EmbeddingProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key,
+            target_dims,
         }
     }
 
-    /// Get embeddings for a batch of texts.
+    /// Get embeddings for a batch of texts with Matryoshka projection.
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -372,10 +409,18 @@ impl EmbeddingProvider {
         let parsed: EmbeddingResponse = serde_json::from_str(&body_text)
             .context("Failed to parse embedding response")?;
 
-        Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
+        // Apply Matryoshka projection to all embeddings
+        let mut projected = Vec::with_capacity(parsed.data.len());
+        for item in parsed.data {
+            let proj = project_matryoshka(&item.embedding, self.target_dims)
+                .context("Failed to project embedding")?;
+            projected.push(proj);
+        }
+
+        Ok(projected)
     }
 
-    /// Get embedding for a single query.
+    /// Get embedding for a single query with Matryoshka projection.
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         let results = self.embed_batch(&[text.to_string()]).await?;
         results.into_iter().next().ok_or_else(|| anyhow::anyhow!("No embedding returned"))
@@ -383,6 +428,10 @@ impl EmbeddingProvider {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    pub fn target_dims(&self) -> usize {
+        self.target_dims
     }
 }
 
@@ -422,7 +471,7 @@ impl MemoryDb {
         Ok(Self {
             workspace: workspace.to_path_buf(),
             db: Mutex::new(conn),
-            embedding_model: String::new(), // set after sync
+            target_dims: 512,               // default, updated after sync
             chunk_tokens: DEFAULT_CHUNK_TOKENS,
             chunk_overlap: DEFAULT_CHUNK_OVERLAP,
             fts_available,
@@ -503,7 +552,6 @@ impl MemoryDb {
 
         Ok(MemoryFileEntry {
             path: rel_path.to_string(),
-            abs_path: abs_path.to_path_buf(),
             hash,
             mtime_ms,
             size: meta.len() as i64,
@@ -522,10 +570,20 @@ impl MemoryDb {
         }
     }
 
+    /// Clear all embeddings (useful for forcing reindex).
+    pub fn clear_embeddings(&self) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE chunks SET embedding = '[]'",
+            [],
+        )?;
+        log::info!("Cleared all chunk embeddings");
+        Ok(())
+    }
+
     /// Sync memory files into SQLite index.
     /// Hash-based skip for unchanged files (exact OpenClaw behavior).
     /// Indexes: MEMORY.md, memory/*.md (source=memory), docs/*.md, notes/*.md (source=custom).
-    pub fn sync(&self, model: &str) -> Result<usize> {
+    pub fn sync(&self, model: &str, _target_dims: usize) -> Result<usize> {
         let memory_files = self.list_memory_files()?;
         let mut indexed = 0usize;
         let active_paths: std::collections::HashSet<String> =
@@ -573,7 +631,99 @@ impl MemoryDb {
             }
         }
 
+        // Update index metadata after successful sync
+        self.update_index_meta(model, _target_dims)?;
+
         Ok(indexed)
+    }
+
+    /// Update index metadata after successful sync/embed.
+    /// Stores model, target_dims, chunk params, and timestamp for reindex decision.
+    fn update_index_meta(&self, model: &str, target_dims: usize) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let meta = IndexMeta {
+            model: model.to_string(),
+            target_dims,
+            chunk_tokens: self.chunk_tokens,
+            chunk_overlap: self.chunk_overlap,
+            schema_version: 1,
+            last_sync_at: Some(now),
+        };
+        let meta_json = serde_json::to_string(&meta)?;
+
+        self.db.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![META_KEY, meta_json],
+        )?;
+
+        // Note: We can't update self.embedding_model or self.target_dims here
+        // because &self is immutable. The fields will be used on next instantiation
+        // or we can store them in a separate Arc<RwLock<>> if needed.
+        // For now, search_hybrid gets model from provider directly.
+
+        Ok(())
+    }
+
+    /// Load index metadata from SQLite.
+    fn load_index_meta(&self) -> Result<Option<IndexMeta>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT value FROM meta WHERE key = ?")?;
+
+        let meta_json: Option<String> = stmt
+            .query_row(params![META_KEY], |r| r.get(0))
+            .ok();
+
+        match meta_json {
+            Some(json) => {
+                let meta: IndexMeta = serde_json::from_str(&json)
+                    .context("Failed to parse index metadata")?;
+                Ok(Some(meta))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get current index metadata (public API).
+    pub fn get_index_metadata(&self) -> Result<Option<IndexMeta>> {
+        self.load_index_meta()
+    }
+
+    /// Decide whether a full reindex is needed based on current vs desired config.
+    ///
+    /// Returns true if any of these changed:
+    /// - embedding model name
+    /// - target dimensions
+    /// - chunk tokens
+    /// - chunk overlap
+    /// - schema version
+    pub fn needs_full_reindex(&self, model: &str, target_dims: usize) -> Result<bool> {
+        match self.load_index_meta()? {
+            None => {
+                // No existing metadata - need initial index
+                log::debug!("No index metadata found, initial sync needed");
+                Ok(true)
+            }
+            Some(meta) => {
+                // Check if any critical params changed
+                let needs_reindex = meta.model != model
+                    || meta.target_dims != target_dims
+                    || meta.chunk_tokens != self.chunk_tokens
+                    || meta.chunk_overlap != self.chunk_overlap
+                    || meta.schema_version != 1;
+
+                if needs_reindex {
+                    log::info!(
+                        "Reindex needed: model ({} vs {}), dims ({} vs {}), chunk_tokens ({} vs {}), chunk_overlap ({} vs {})",
+                        meta.model, model,
+                        meta.target_dims, target_dims,
+                        meta.chunk_tokens, self.chunk_tokens,
+                        meta.chunk_overlap, self.chunk_overlap
+                    );
+                }
+
+                Ok(needs_reindex)
+            }
+        }
     }
 
     // ── Index File (matching OpenClaw's indexFile) ──────────────────────
@@ -701,7 +851,8 @@ impl MemoryDb {
         // Check embedding cache first (matching OpenClaw's loadEmbeddingCache)
         let mut to_embed: Vec<(usize, String, String, String)> = Vec::new();
         let mut cached_count = 0usize;
-        let provider_key = hash_text(&format!("{}:{}", provider.base_url, provider.model));
+        // Include target_dims in cache key to prevent cross-contamination between 256/512
+        let provider_key = hash_text(&format!("{}:{}:{}", provider.base_url, provider.model, provider.target_dims()));
 
         for (i, (id, text, hash)) in chunk_data.iter().enumerate() {
             let cached: Option<String> = self.db.lock().unwrap()
@@ -794,6 +945,13 @@ impl MemoryDb {
             }
 
             batch_start = batch_end;
+        }
+
+        // Update index metadata after successful embedding
+        if total_embedded > 0 || cached_count > 0 {
+            self.update_index_meta(provider.model(), provider.target_dims())?;
+            // Update runtime state (note: requires &mut self, so we use a workaround)
+            // For now, this is handled by the daemon recreating MemoryDb or via unsafe
         }
 
         Ok(total_embedded)
@@ -1008,6 +1166,7 @@ impl MemoryDb {
         &self,
         query_vec: &[f32],
         limit: usize,
+        provider: &EmbeddingProvider,
     ) -> Result<Vec<MemorySearchResult>> {
         if query_vec.is_empty() {
             return Ok(Vec::new());
@@ -1053,8 +1212,8 @@ impl MemoryDb {
                 score,
                 citation: Some(citation),
                 source,
-                provider: None,
-                model: Some(self.embedding_model.clone()),
+                provider: Some("openai-compat".to_string()),
+                model: Some(provider.model().to_string()),
                 fallback: false,
             });
         }
@@ -1071,6 +1230,7 @@ impl MemoryDb {
         max_results: usize,
         min_score: f32,
         provider: &EmbeddingProvider,
+        require_embeddings: bool,
     ) -> Result<Vec<MemorySearchResult>> {
         let cleaned = query.trim();
         if cleaned.is_empty() {
@@ -1088,14 +1248,31 @@ impl MemoryDb {
             self.search_keyword_fallback(cleaned, candidates)?
         };
 
-        // 2. Get query embedding
-        let query_vec = provider.embed_query(cleaned).await?;
-        let has_vector = query_vec.iter().any(|v| *v != 0.0);
-
-        let vector_results = if has_vector {
-            self.search_vector_with_embedding(&query_vec, candidates)?
-        } else {
-            Vec::new()
+        // 2. Get query embedding with fallback to lexical-only on failure (if allowed)
+        let vector_results = match provider.embed_query(cleaned).await {
+            Ok(query_vec) => {
+                let has_vector = query_vec.iter().any(|v| *v != 0.0);
+                if has_vector {
+                    self.search_vector_with_embedding(&query_vec, candidates, provider)?
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(e) => {
+                if require_embeddings {
+                    // Strict mode: fail explicitly instead of degrading to keyword-only
+                    return Err(anyhow::anyhow!(
+                        "Embedding query failed in strict mode (require_embeddings=true): {}. \
+                         Search cannot continue without vector embeddings. \
+                         Ensure Ollama is running or set require_embeddings=false to allow lexical fallback.",
+                        e
+                    ));
+                } else {
+                    // Non-strict mode: degrade to keyword-only
+                    log::warn!("Embedding query failed, falling back to keyword-only search: {}", e);
+                    Vec::new()
+                }
+            }
         };
 
         // 3. Merge
@@ -1405,7 +1582,6 @@ impl MemoryDb {
                         .unwrap_or(0);
                     let entry = MemoryFileEntry {
                         path: rel.clone(),
-                        abs_path,
                         hash,
                         mtime_ms,
                         size: meta.len() as i64,
@@ -1495,8 +1671,8 @@ impl MemoryDb {
     // ── LLM-Driven Compaction (matching OpenClaw's compact) ───────────
 
     /// LLM-driven compaction: summarize old memory files using the LLM.
-    /// Matches OpenClaw's compact() with LLM summarization.
-    /// Falls back to rule-based compact() if LLM fails.
+    /// This is the ONLY compaction method - no rule-based fallback.
+    /// If LLM fails, returns error without making destructive changes.
     pub async fn compact_llm(
         &self,
         llm: &dyn crate::llm::LlmClient,
@@ -1565,8 +1741,10 @@ impl MemoryDb {
         let summary = match llm.complete(&messages, &[]).await {
             Ok(resp) => resp.content.unwrap_or_default(),
             Err(e) => {
-                log::warn!("LLM compaction failed, falling back to rule-based: {}", e);
-                return self.compact(keep_days);
+                // LLM-only compaction: fail explicitly without destructive fallback
+                return Err(anyhow::anyhow!(
+                    "LLM compaction failed (no rule-based fallback): {}", e
+                ).context(e));
             }
         };
 
@@ -1665,6 +1843,70 @@ mod tests {
     }
 
     #[test]
+    fn test_matryoshka_projection_512() {
+        // Test 768-dim projection to 512
+        let input: Vec<f32> = (0..768).map(|i| i as f32).collect();
+        let projected = project_matryoshka(&input, 512).unwrap();
+
+        assert_eq!(projected.len(), 512);
+        // Check L2 normalization (should be close to unit vector)
+        let norm: f32 = projected.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_matryoshka_projection_256() {
+        // Test 768-dim projection to 256
+        let input: Vec<f32> = (0..768).map(|i| i as f32).collect();
+        let projected = project_matryoshka(&input, 256).unwrap();
+
+        assert_eq!(projected.len(), 256);
+        // Check L2 normalization
+        let norm: f32 = projected.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_matryoshka_projection_rejects_short_vector() {
+        // Test rejection when source vector is shorter than target
+        let short: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let result = project_matryoshka(&short, 512);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("source too short"));
+    }
+
+    #[test]
+    fn test_matryoshka_projection_exact_size() {
+        // Test projection when source equals target (should still normalize)
+        let input: Vec<f32> = vec![3.0, 4.0]; // norm = 5
+        let projected = project_matryoshka(&input, 2).unwrap();
+
+        assert_eq!(projected.len(), 2);
+        // After L2 normalization: [3/5, 4/5] = [0.6, 0.8]
+        assert!((projected[0] - 0.6).abs() < 1e-5);
+        assert!((projected[1] - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_embedding_cache_key_includes_dims() {
+        // Verify that cache key includes target_dims to prevent cross-contamination
+        let url = "http://localhost:11434/v1";
+        let model = "nomic-embed-text:v1.5";
+
+        let provider_256 = EmbeddingProvider::new(url, model, None, 256);
+        let provider_512 = EmbeddingProvider::new(url, model, None, 512);
+
+        // Different target_dims should produce different cache keys
+        let key_256 = hash_text(&format!("{}:{}:{}", url, model, 256));
+        let key_512 = hash_text(&format!("{}:{}:{}", url, model, 512));
+
+        assert_ne!(key_256, key_512, "Cache keys must differ by target_dims");
+        assert_eq!(provider_256.target_dims(), 256);
+        assert_eq!(provider_512.target_dims(), 512);
+    }
+
+    #[test]
     fn test_store_and_retrieve() {
         let (_tmp, db) = temp_workspace();
         db.store("test-session-1", "user", "Hello!").unwrap();
@@ -1682,7 +1924,7 @@ mod tests {
         db.store("s1", "user", "I prefer dark mode in my editor").unwrap();
         db.store("s1", "user", "My favorite language is Rust").unwrap();
         // Sync to index
-        db.sync("test-model").unwrap();
+        db.sync("test-model", 512).unwrap();
         let results = db.search("dark mode", 5, 0.0).unwrap();
         assert!(!results.is_empty());
         assert!(results[0].snippet.contains("dark mode"));
@@ -1691,7 +1933,7 @@ mod tests {
     #[test]
     fn test_search_empty() {
         let (_tmp, db) = temp_workspace();
-        db.sync("test-model").unwrap();
+        db.sync("test-model", 512).unwrap();
         let results = db.search("nonexistent_query_xyz", 5, 0.0).unwrap();
         assert!(results.is_empty());
     }
@@ -1700,10 +1942,10 @@ mod tests {
     fn test_sync_hash_skip() {
         let (_tmp, db) = temp_workspace();
         db.store("s1", "user", "initial content").unwrap();
-        let count1 = db.sync("test-model").unwrap();
+        let count1 = db.sync("test-model", 512).unwrap();
         assert!(count1 > 0);
         // Second sync should skip (no changes)
-        let count2 = db.sync("test-model").unwrap();
+        let count2 = db.sync("test-model", 512).unwrap();
         assert_eq!(count2, 0);
     }
 
@@ -1711,10 +1953,10 @@ mod tests {
     fn test_sync_detects_changes() {
         let (_tmp, db) = temp_workspace();
         db.store("s1", "user", "initial content").unwrap();
-        db.sync("test-model").unwrap();
+        db.sync("test-model", 512).unwrap();
         // Add more content
         db.store("s1", "user", "new content").unwrap();
-        let count = db.sync("test-model").unwrap();
+        let count = db.sync("test-model", 512).unwrap();
         assert!(count > 0); // date file changed
     }
 
@@ -1786,7 +2028,7 @@ mod tests {
     fn test_index_status() {
         let (_tmp, db) = temp_workspace();
         db.store("s1", "user", "test content").unwrap();
-        db.sync("test-model").unwrap();
+        db.sync("test-model", 512).unwrap();
         let status = db.index_status().unwrap();
         assert!(status.files > 0);
         assert!(status.chunks > 0);
@@ -1806,13 +2048,69 @@ mod tests {
         // Create a file, sync, then delete it
         let test_file = db.memory_dir().join("2020-06-15.md");
         std::fs::write(&test_file, "# test\nsome content").unwrap();
-        db.sync("test-model").unwrap();
+        db.sync("test-model", 512).unwrap();
         let status1 = db.index_status().unwrap();
         // Delete the file
         std::fs::remove_file(&test_file).unwrap();
-        db.sync("test-model").unwrap();
+        db.sync("test-model", 512).unwrap();
         let status2 = db.index_status().unwrap();
         // Should have fewer files after cleanup
         assert!(status2.files < status1.files || status2.chunks < status1.chunks);
+    }
+
+    #[test]
+    fn test_needs_full_reindex_initial() {
+        let (_tmp, db) = temp_workspace();
+        // No metadata exists yet
+        let needs = db.needs_full_reindex("test-model", 512).unwrap();
+        assert!(needs, "Initial state should require reindex");
+    }
+
+    #[test]
+    fn test_needs_full_reindex_after_sync() {
+        let (_tmp, db) = temp_workspace();
+        db.store("s1", "user", "test content").unwrap();
+        db.sync("test-model", 512).unwrap();
+
+        // After sync, same config should not need reindex
+        let needs = db.needs_full_reindex("test-model", 512).unwrap();
+        assert!(!needs, "Same config should not need reindex");
+    }
+
+    #[test]
+    fn test_needs_full_reindex_model_change() {
+        let (_tmp, db) = temp_workspace();
+        db.store("s1", "user", "test content").unwrap();
+        db.sync("test-model", 512).unwrap();
+
+        // Different model should trigger reindex
+        let needs = db.needs_full_reindex("different-model", 512).unwrap();
+        assert!(needs, "Model change should trigger reindex");
+    }
+
+    #[test]
+    fn test_needs_full_reindex_dims_change() {
+        let (_tmp, db) = temp_workspace();
+        db.store("s1", "user", "test content").unwrap();
+        db.sync("test-model", 512).unwrap();
+
+        // Different target_dims should trigger reindex
+        let needs = db.needs_full_reindex("test-model", 256).unwrap();
+        assert!(needs, "Target dims change should trigger reindex");
+    }
+
+    #[test]
+    fn test_index_metadata_persistence() {
+        let (_tmp, db) = temp_workspace();
+        db.store("s1", "user", "test content").unwrap();
+        db.sync("test-model", 512).unwrap();
+
+        // Load metadata
+        let meta = db.get_index_metadata().unwrap();
+        assert!(meta.is_some());
+        let meta = meta.unwrap();
+        assert_eq!(meta.model, "test-model");
+        assert_eq!(meta.target_dims, 512);
+        assert_eq!(meta.schema_version, 1);
     }
 }

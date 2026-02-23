@@ -995,9 +995,9 @@ impl Agent {
                         }
                     }
 
-                    // Strategy 2: LLM-driven memory compaction
+                    // Strategy 2: LLM-driven memory compaction (LLM-only, no fallback)
                     if attempt >= 1 {
-                        let _ = self.memory.compact(3);
+                        let _ = self.memory.compact_llm(&*self.llm, 3).await;
                     }
 
                     // Strategy 3: Aggressive history truncation
@@ -1048,7 +1048,7 @@ impl Agent {
                     }
 
                     if attempt >= 1 {
-                        let _ = self.memory.compact(3);
+                        let _ = self.memory.compact_llm(&*self.llm, 3).await;
                     }
 
                     let budget = if attempt >= 2 {

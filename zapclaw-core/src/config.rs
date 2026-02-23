@@ -40,6 +40,35 @@ pub struct FileConfig {
 
     /// Inbound server bind address
     pub inbound_bind: Option<String>,
+
+    // ── Memory System Configuration ─────────────────────────────────────
+
+    /// Base URL for embedding API (local Ollama for memory embeddings)
+    pub memory_embedding_base_url: Option<String>,
+
+    /// Embedding model name (default: nomic-embed-text)
+    pub memory_embedding_model: Option<String>,
+
+    /// Target dimensions for Matryoshka projection (256 or 512, default: 512)
+    pub memory_embedding_target_dims: Option<usize>,
+
+    /// Batch size for embedding requests (default: 32)
+    pub memory_embedding_batch_size: Option<usize>,
+
+    /// Enable memory daemon (default: true)
+    pub memory_daemon_enabled: Option<bool>,
+
+    /// Sync interval in seconds (default: 15)
+    pub memory_sync_interval_secs: Option<usize>,
+
+    /// Sync before search (default: true)
+    pub memory_sync_on_search: Option<bool>,
+
+    /// Require embeddings to be available (default: true)
+    pub memory_require_embeddings: Option<bool>,
+
+    /// Allow lexical fallback when embeddings unavailable (default: false)
+    pub memory_allow_lexical_fallback: Option<bool>,
 }
 
 impl Default for FileConfig {
@@ -56,6 +85,15 @@ impl Default for FileConfig {
             context_window_tokens: None,
             inbound_port: None,
             inbound_bind: None,
+            memory_embedding_base_url: None,
+            memory_embedding_model: None,
+            memory_embedding_target_dims: None,
+            memory_embedding_batch_size: None,
+            memory_daemon_enabled: None,
+            memory_sync_interval_secs: None,
+            memory_sync_on_search: None,
+            memory_require_embeddings: None,
+            memory_allow_lexical_fallback: None,
         }
     }
 }
@@ -103,6 +141,35 @@ pub struct Config {
 
     /// Inbound server bind address (default: 127.0.0.1)
     pub inbound_bind: String,
+
+    // ── Memory System Configuration ─────────────────────────────────────
+
+    /// Base URL for embedding API (local Ollama for memory embeddings)
+    pub memory_embedding_base_url: String,
+
+    /// Embedding model name (default: nomic-embed-text)
+    pub memory_embedding_model: String,
+
+    /// Target dimensions for Matryoshka projection (256 or 512, default: 512)
+    pub memory_embedding_target_dims: usize,
+
+    /// Batch size for embedding requests (default: 32)
+    pub memory_embedding_batch_size: usize,
+
+    /// Enable memory daemon (default: true)
+    pub memory_daemon_enabled: bool,
+
+    /// Sync interval in seconds (default: 15)
+    pub memory_sync_interval_secs: usize,
+
+    /// Sync before search (default: true)
+    pub memory_sync_on_search: bool,
+
+    /// Require embeddings to be available (default: true)
+    pub memory_require_embeddings: bool,
+
+    /// Allow lexical fallback when embeddings unavailable (default: false)
+    pub memory_allow_lexical_fallback: bool,
 }
 
 impl Default for Config {
@@ -120,6 +187,16 @@ impl Default for Config {
             context_window_tokens: 128_000,
             inbound_port: 9876,
             inbound_bind: "127.0.0.1".to_string(),
+            // Memory system defaults
+            memory_embedding_base_url: "http://localhost:11434/v1".to_string(),
+            memory_embedding_model: "nomic-embed-text:v1.5".to_string(),
+            memory_embedding_target_dims: 512,
+            memory_embedding_batch_size: 32,
+            memory_daemon_enabled: true,
+            memory_sync_interval_secs: 15,
+            memory_sync_on_search: true,
+            memory_require_embeddings: true,
+            memory_allow_lexical_fallback: false,
         }
     }
 }
@@ -225,6 +302,72 @@ impl Config {
         }
 
         Ok(canonical)
+    }
+
+    /// Validate memory embedding base URL is loopback-only for local mode.
+    ///
+    /// For security, memory embeddings should only use local Ollama (localhost, 127.0.0.1, ::1).
+    /// Returns Ok(()) if valid, Err(description) if non-loopback URL detected.
+    fn validate_memory_embedding_url(url: &str) -> Result<(), String> {
+        // Parse URL to extract host
+        let parsed = url::Url::parse(url)
+            .map_err(|e| format!("invalid URL: {}", e))?;
+
+        let host = parsed.host_str()
+            .ok_or_else(|| "missing host in URL".to_string())?;
+
+        // Allow loopback addresses only
+        let is_loopback = match host {
+            "localhost" |
+            "127.0.0.1" |
+            "::1" |
+            "[::1]" => true,
+            _ => false,
+        };
+
+        if !is_loopback {
+            return Err(format!(
+                "memory embedding endpoint must be loopback-only (localhost, 127.0.0.1, or ::1) for security. Got: {}. \
+                 If you need remote embeddings, set ZAPCLAW_MEMORY_ALLOW_LEXICAL_FALLBACK=true to use keyword-only search.",
+                host
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate memory configuration settings.
+    ///
+    /// Checks:
+    /// 1. Embedding URL is loopback-only
+    /// 2. Target dimensions is 256 or 512
+    /// 3. Batch size is reasonable (>0 and <=256)
+    pub fn validate_memory_config(&self) -> Result<(), String> {
+        // Validate embedding URL if embeddings are required
+        if self.memory_require_embeddings {
+            Self::validate_memory_embedding_url(&self.memory_embedding_base_url)
+                .map_err(|e| format!("memory embedding URL validation failed: {}", e))?;
+        }
+
+        // Validate target dimensions
+        match self.memory_embedding_target_dims {
+            256 | 512 => {},
+            other => return Err(format!(
+                "memory_embedding_target_dims must be 256 or 512, got: {}. \
+                 Matryoshka projection only supports these dimensions for nomic-embed-text:v1.5",
+                other
+            )),
+        }
+
+        // Validate batch size
+        if self.memory_embedding_batch_size == 0 {
+            return Err("memory_embedding_batch_size must be > 0".to_string());
+        }
+        if self.memory_embedding_batch_size > 256 {
+            return Err("memory_embedding_batch_size must be <= 256".to_string());
+        }
+
+        Ok(())
     }
 
     /// Resolve home config path (~/.zapclaw/zapclaw.json)
@@ -358,6 +501,34 @@ impl Config {
                     }
                     if file_cfg.inbound_bind.is_some() {
                         merged.inbound_bind = file_cfg.inbound_bind;
+                    }
+                    // Memory config fields
+                    if file_cfg.memory_embedding_base_url.is_some() {
+                        merged.memory_embedding_base_url = file_cfg.memory_embedding_base_url;
+                    }
+                    if file_cfg.memory_embedding_model.is_some() {
+                        merged.memory_embedding_model = file_cfg.memory_embedding_model;
+                    }
+                    if file_cfg.memory_embedding_target_dims.is_some() {
+                        merged.memory_embedding_target_dims = file_cfg.memory_embedding_target_dims;
+                    }
+                    if file_cfg.memory_embedding_batch_size.is_some() {
+                        merged.memory_embedding_batch_size = file_cfg.memory_embedding_batch_size;
+                    }
+                    if file_cfg.memory_daemon_enabled.is_some() {
+                        merged.memory_daemon_enabled = file_cfg.memory_daemon_enabled;
+                    }
+                    if file_cfg.memory_sync_interval_secs.is_some() {
+                        merged.memory_sync_interval_secs = file_cfg.memory_sync_interval_secs;
+                    }
+                    if file_cfg.memory_sync_on_search.is_some() {
+                        merged.memory_sync_on_search = file_cfg.memory_sync_on_search;
+                    }
+                    if file_cfg.memory_require_embeddings.is_some() {
+                        merged.memory_require_embeddings = file_cfg.memory_require_embeddings;
+                    }
+                    if file_cfg.memory_allow_lexical_fallback.is_some() {
+                        merged.memory_allow_lexical_fallback = file_cfg.memory_allow_lexical_fallback;
                     }
                 }
                 Err(e) => {
@@ -713,6 +884,49 @@ impl Config {
             }
         }
 
+        // Memory system env vars
+        if let Ok(url) = std::env::var("ZAPCLAW_MEMORY_EMBEDDING_BASE_URL") {
+            config.memory_embedding_base_url = url;
+        }
+
+        if let Ok(model) = std::env::var("ZAPCLAW_MEMORY_EMBEDDING_MODEL") {
+            config.memory_embedding_model = model;
+        }
+
+        if let Ok(dims) = std::env::var("ZAPCLAW_MEMORY_EMBEDDING_TARGET_DIMS") {
+            if let Ok(n) = dims.parse::<usize>() {
+                config.memory_embedding_target_dims = n;
+            }
+        }
+
+        if let Ok(batch) = std::env::var("ZAPCLAW_MEMORY_EMBEDDING_BATCH_SIZE") {
+            if let Ok(n) = batch.parse::<usize>() {
+                config.memory_embedding_batch_size = n;
+            }
+        }
+
+        if let Ok(enabled) = std::env::var("ZAPCLAW_MEMORY_DAEMON_ENABLED") {
+            config.memory_daemon_enabled = enabled.to_lowercase() != "false";
+        }
+
+        if let Ok(interval) = std::env::var("ZAPCLAW_MEMORY_SYNC_INTERVAL_SECS") {
+            if let Ok(n) = interval.parse::<usize>() {
+                config.memory_sync_interval_secs = n;
+            }
+        }
+
+        if let Ok(sync) = std::env::var("ZAPCLAW_MEMORY_SYNC_ON_SEARCH") {
+            config.memory_sync_on_search = sync.to_lowercase() != "false";
+        }
+
+        if let Ok(req) = std::env::var("ZAPCLAW_MEMORY_REQUIRE_EMBEDDINGS") {
+            config.memory_require_embeddings = req.to_lowercase() != "false";
+        }
+
+        if let Ok(fallback) = std::env::var("ZAPCLAW_MEMORY_ALLOW_LEXICAL_FALLBACK") {
+            config.memory_allow_lexical_fallback = fallback.to_lowercase() != "false";
+        }
+
         config
     }
 
@@ -761,6 +975,35 @@ impl Config {
         }
         if let Some(bind) = &file_cfg.inbound_bind {
             config.inbound_bind = bind.clone();
+        }
+
+        // Memory system file config
+        if let Some(url) = &file_cfg.memory_embedding_base_url {
+            config.memory_embedding_base_url = url.clone();
+        }
+        if let Some(model) = &file_cfg.memory_embedding_model {
+            config.memory_embedding_model = model.clone();
+        }
+        if let Some(dims) = file_cfg.memory_embedding_target_dims {
+            config.memory_embedding_target_dims = dims;
+        }
+        if let Some(batch) = file_cfg.memory_embedding_batch_size {
+            config.memory_embedding_batch_size = batch;
+        }
+        if let Some(enabled) = file_cfg.memory_daemon_enabled {
+            config.memory_daemon_enabled = enabled;
+        }
+        if let Some(interval) = file_cfg.memory_sync_interval_secs {
+            config.memory_sync_interval_secs = interval;
+        }
+        if let Some(sync) = file_cfg.memory_sync_on_search {
+            config.memory_sync_on_search = sync;
+        }
+        if let Some(req) = file_cfg.memory_require_embeddings {
+            config.memory_require_embeddings = req;
+        }
+        if let Some(fallback) = file_cfg.memory_allow_lexical_fallback {
+            config.memory_allow_lexical_fallback = fallback;
         }
 
         // Apply env config (overrides file and defaults)
@@ -812,6 +1055,59 @@ impl Config {
             }
         }
 
+        // Memory system env overrides
+        if std::env::var("ZAPCLAW_MEMORY_EMBEDDING_BASE_URL").is_ok() {
+            if let Ok(url) = std::env::var("ZAPCLAW_MEMORY_EMBEDDING_BASE_URL") {
+                config.memory_embedding_base_url = url;
+            }
+        }
+        if std::env::var("ZAPCLAW_MEMORY_EMBEDDING_MODEL").is_ok() {
+            if let Ok(model) = std::env::var("ZAPCLAW_MEMORY_EMBEDDING_MODEL") {
+                config.memory_embedding_model = model;
+            }
+        }
+        if std::env::var("ZAPCLAW_MEMORY_EMBEDDING_TARGET_DIMS").is_ok() {
+            if let Ok(dims) = std::env::var("ZAPCLAW_MEMORY_EMBEDDING_TARGET_DIMS") {
+                if let Ok(n) = dims.parse::<usize>() {
+                    config.memory_embedding_target_dims = n;
+                }
+            }
+        }
+        if std::env::var("ZAPCLAW_MEMORY_EMBEDDING_BATCH_SIZE").is_ok() {
+            if let Ok(batch) = std::env::var("ZAPCLAW_MEMORY_EMBEDDING_BATCH_SIZE") {
+                if let Ok(n) = batch.parse::<usize>() {
+                    config.memory_embedding_batch_size = n;
+                }
+            }
+        }
+        if std::env::var("ZAPCLAW_MEMORY_DAEMON_ENABLED").is_ok() {
+            if let Ok(enabled) = std::env::var("ZAPCLAW_MEMORY_DAEMON_ENABLED") {
+                config.memory_daemon_enabled = enabled.to_lowercase() != "false";
+            }
+        }
+        if std::env::var("ZAPCLAW_MEMORY_SYNC_INTERVAL_SECS").is_ok() {
+            if let Ok(interval) = std::env::var("ZAPCLAW_MEMORY_SYNC_INTERVAL_SECS") {
+                if let Ok(n) = interval.parse::<usize>() {
+                    config.memory_sync_interval_secs = n;
+                }
+            }
+        }
+        if std::env::var("ZAPCLAW_MEMORY_SYNC_ON_SEARCH").is_ok() {
+            if let Ok(sync) = std::env::var("ZAPCLAW_MEMORY_SYNC_ON_SEARCH") {
+                config.memory_sync_on_search = sync.to_lowercase() != "false";
+            }
+        }
+        if std::env::var("ZAPCLAW_MEMORY_REQUIRE_EMBEDDINGS").is_ok() {
+            if let Ok(req) = std::env::var("ZAPCLAW_MEMORY_REQUIRE_EMBEDDINGS") {
+                config.memory_require_embeddings = req.to_lowercase() != "false";
+            }
+        }
+        if std::env::var("ZAPCLAW_MEMORY_ALLOW_LEXICAL_FALLBACK").is_ok() {
+            if let Ok(fallback) = std::env::var("ZAPCLAW_MEMORY_ALLOW_LEXICAL_FALLBACK") {
+                config.memory_allow_lexical_fallback = fallback.to_lowercase() != "false";
+            }
+        }
+
         config
     }
 
@@ -847,6 +1143,17 @@ impl Config {
             "_comment_api_base_url": "For Ollama: http://localhost:11434/v1, For OpenAI: https://api.openai.com/v1",
             "_comment_model_name": "Ollama: phi3:mini, OpenAI: gpt-4o",
             "_comment_secrets": "API keys must be set via environment variables: ZAPCLAW_API_KEY, ZAPCLAW_SEARCH_API_KEY, ZAPCLAW_INBOUND_KEY",
+            "memory_embedding_base_url": "http://localhost:11434/v1",
+            "memory_embedding_model": "nomic-embed-text:v1.5",
+            "memory_embedding_target_dims": 512,
+            "memory_embedding_batch_size": 32,
+            "memory_daemon_enabled": true,
+            "memory_sync_interval_secs": 15,
+            "memory_sync_on_search": true,
+            "memory_require_embeddings": true,
+            "memory_allow_lexical_fallback": false,
+            "_comment_memory": "Memory system settings for hybrid search (BM25 + vector embeddings)",
+            "_comment_memory_setup": "Install Ollama and run: ollama pull nomic-embed-text:v1.5",
         });
 
         serde_json::to_string_pretty(&template).unwrap()
@@ -866,6 +1173,15 @@ impl Config {
             context_window_tokens: Some(self.context_window_tokens),
             inbound_port: Some(self.inbound_port),
             inbound_bind: Some(self.inbound_bind.clone()),
+            memory_embedding_base_url: Some(self.memory_embedding_base_url.clone()),
+            memory_embedding_model: Some(self.memory_embedding_model.clone()),
+            memory_embedding_target_dims: Some(self.memory_embedding_target_dims),
+            memory_embedding_batch_size: Some(self.memory_embedding_batch_size),
+            memory_daemon_enabled: Some(self.memory_daemon_enabled),
+            memory_sync_interval_secs: Some(self.memory_sync_interval_secs),
+            memory_sync_on_search: Some(self.memory_sync_on_search),
+            memory_require_embeddings: Some(self.memory_require_embeddings),
+            memory_allow_lexical_fallback: Some(self.memory_allow_lexical_fallback),
         };
 
         serde_json::to_string_pretty(&file_config)
