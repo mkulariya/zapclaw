@@ -61,6 +61,27 @@ pub fn is_bwrap_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve the host's HOME directory for re-exec into sandbox.
+///
+/// This is called before re-exec to preserve the real user home directory
+/// across sandbox transition. Inside the sandbox, HOME is set to the workspace,
+/// but config resolution needs to know the original home for ~/.zapclaw/zapclaw.json.
+///
+/// Precedence:
+/// 1. ZAPCLAW_HOST_HOME if already set (for retry consistency)
+/// 2. Current HOME environment variable
+///
+/// Returns None if no home can be determined.
+pub fn resolve_host_home_for_reexec() -> Option<std::path::PathBuf> {
+    // Check for existing ZAPCLAW_HOST_HOME first (retry consistency)
+    if let Ok(host_home) = std::env::var("ZAPCLAW_HOST_HOME") {
+        return Some(std::path::PathBuf::from(host_home));
+    }
+
+    // Fall back to current HOME
+    std::env::var("HOME").ok().map(std::path::PathBuf::from)
+}
+
 /// Check if environment claims we're sandboxed.
 fn sandbox_claimed_by_env() -> bool {
     std::env::var("ZAPCLAW_SANDBOXED")
@@ -278,6 +299,9 @@ fn reexec_into_sandbox(workspace: &Path, no_network: bool, attempt: u8) -> Resul
     // Collect original CLI args (skip argv[0])
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Resolve host home before re-exec (for config resolution inside sandbox)
+    let host_home = resolve_host_home_for_reexec();
+
     // Build bwrap command
     let mut cmd = std::process::Command::new("bwrap");
 
@@ -297,6 +321,12 @@ fn reexec_into_sandbox(workspace: &Path, no_network: bool, attempt: u8) -> Resul
     cmd.args(["--setenv", "HOME", &workspace_str]);              // HOME = workspace
     cmd.args(["--setenv", "ZAPCLAW_SANDBOXED", "1"]);            // Signal to child
     cmd.args(["--setenv", "ZAPCLAW_SANDBOX_ATTEMPT", &attempt.to_string()]); // Loop guard
+
+    // Preserve host home for config resolution (set AFTER HOME=workspace)
+    if let Some(host_home_path) = host_home {
+        let host_home_str = host_home_path.to_string_lossy().to_string();
+        cmd.args(["--setenv", "ZAPCLAW_HOST_HOME", &host_home_str]);
+    }
 
     // Ensure the binary itself is readable inside sandbox
     cmd.args(["--ro-bind", &exe_str, &exe_str]);
@@ -331,6 +361,46 @@ fn reexec_into_sandbox(workspace: &Path, no_network: bool, attempt: u8) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_home_prefers_existing_zapclaw_host_home() {
+        // Set ZAPCLAW_HOST_HOME
+        std::env::set_var("ZAPCLAW_HOST_HOME", "/from/host/home");
+        
+        let result = resolve_host_home_for_reexec();
+        assert_eq!(result, Some(std::path::PathBuf::from("/from/host/home")));
+        
+        std::env::remove_var("ZAPCLAW_HOST_HOME");
+    }
+
+    #[test]
+    fn host_home_falls_back_to_home() {
+        // Ensure ZAPCLAW_HOST_HOME is not set
+        std::env::remove_var("ZAPCLAW_HOST_HOME");
+        
+        // This test assumes HOME is set in test environment
+        let home_env = std::env::var("HOME");
+        if home_env.is_ok() {
+            let result = resolve_host_home_for_reexec();
+            assert_eq!(result, home_env.ok().map(std::path::PathBuf::from));
+        }
+    }
+
+    #[test]
+    fn host_home_none_when_unset() {
+        // Unset both HOME and ZAPCLAW_HOST_HOME
+        std::env::remove_var("ZAPCLAW_HOST_HOME");
+        let original_home = std::env::var("HOME").ok();
+        std::env::remove_var("HOME");
+        
+        let result = resolve_host_home_for_reexec();
+        assert_eq!(result, None);
+        
+        // Restore HOME if it was set
+        if let Some(val) = original_home {
+            std::env::set_var("HOME", val);
+        }
+    }
 
     #[test]
     fn test_is_sandboxed_false_by_default() {

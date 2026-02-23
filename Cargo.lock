@@ -3279,6 +3279,7 @@ dependencies = [
  "env_logger",
  "futures-core",
  "hostname",
+ "libc",
  "log",
  "regex",
  "reqwest",

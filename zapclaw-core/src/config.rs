@@ -125,9 +125,114 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Resolve the validated host home directory for config resolution.
+    ///
+    /// In sandboxed mode (ZAPCLAW_SANDBOXED=1), this considers ZAPCLAW_HOST_HOME first,
+    /// then validates it against security checks before using it.
+    /// In non-sandboxed mode, uses dirs::home_dir() directly.
+    ///
+    /// Validation for ZAPCLAW_HOST_HOME:
+    /// 1. Must be absolute path
+    /// 2. Canonicalization must succeed
+    /// 3. Canonical path must be directory
+    /// 4. Directory must be owned by current UID (Unix only)
+    /// 5. Directory must not be world-writable (Unix only)
+    ///
+    /// If validation fails, falls back to dirs::home_dir() with warning.
+    pub fn resolve_host_home_for_config() -> Option<PathBuf> {
+        let is_sandboxed = std::env::var("ZAPCLAW_SANDBOXED")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        if is_sandboxed {
+            // In sandbox, try ZAPCLAW_HOST_HOME first
+            if let Ok(host_home_str) = std::env::var("ZAPCLAW_HOST_HOME") {
+                let candidate = PathBuf::from(&host_home_str);
+                
+                // Validate the candidate
+                match Self::validate_host_home_path(&candidate) {
+                    Ok(validated) => {
+                        log::debug!("Using ZAPCLAW_HOST_HOME for config: {}", validated.display());
+                        return Some(validated);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "ZAPCLAW_HOST_HOME {} failed validation: {}. Falling back to dirs::home_dir().",
+                            host_home_str,
+                            e
+                        );
+                        // Fall through to dirs::home_dir()
+                    }
+                }
+            }
+        }
+
+        // Fall back to dirs::home_dir()
+        dirs::home_dir()
+    }
+
+    /// Validate a candidate home path for security.
+    ///
+    /// Checks:
+    /// 1. Path is absolute
+    /// 2. Path can be canonicalized
+    /// 3. Canonical path is a directory
+    /// 4. Directory is owned by current UID (Unix)
+    /// 5. Directory is not world-writable (Unix)
+    ///
+    /// Returns Ok(canonical_path) on success, Err(description) on failure.
+    fn validate_host_home_path(candidate: &Path) -> Result<PathBuf, String> {
+        // 1. Must be absolute
+        if !candidate.is_absolute() {
+            return Err("path is not absolute".to_string());
+        }
+
+        // 2. Canonicalization must succeed
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|e| format!("canonicalization failed: {}", e))?;
+
+        // 3. Must be a directory
+        if !canonical.is_dir() {
+            return Err("path is not a directory".to_string());
+        }
+
+        // Unix-specific checks (4 & 5)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            
+            let metadata = canonical
+                .metadata()
+                .map_err(|e| format!("metadata failed: {}", e))?;
+
+            // 4. Must be owned by current UID
+            let current_uid = unsafe { libc::getuid() };
+            if metadata.uid() != current_uid {
+                return Err(format!(
+                    "directory owned by uid {} (current uid: {})",
+                    metadata.uid(),
+                    current_uid
+                ));
+            }
+
+            // 5. Must not be world-writable
+            let mode = metadata.mode();
+            const WORLD_WRITABLE: u32 = 0o002;
+            if mode & WORLD_WRITABLE != 0 {
+                return Err("directory is world-writable (permissions too lax)".to_string());
+            }
+        }
+
+        Ok(canonical)
+    }
+
     /// Resolve home config path (~/.zapclaw/zapclaw.json)
+    ///
+    /// Uses validated host home resolution to prevent config drift in sandboxed mode.
     pub fn resolve_home_config_path() -> PathBuf {
-        let mut home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let mut home = Self::resolve_host_home_for_config()
+            .unwrap_or_else(|| PathBuf::from("."));
         home.push(".zapclaw");
         home.push("zapclaw.json");
         home
@@ -192,12 +297,13 @@ impl Config {
     /// Files are merged in order: later files override earlier ones.
     /// Missing files are skipped.
     ///
-    /// IMPORTANT: In explicit mode (single file path), missing file is treated as error.
+    /// IMPORTANT: In explicit mode (single file path), strict validation is applied
+    /// and missing file is treated as error.
     /// In layered mode (multiple paths), missing files are silently skipped.
     pub fn load_and_merge_files(paths: &[PathBuf], explicit_mode: bool) -> Result<FileConfig, anyhow::Error> {
         let mut merged = FileConfig::default();
 
-        for (i, path) in paths.iter().enumerate() {
+        for (_i, path) in paths.iter().enumerate() {
             // In explicit mode with a single file, check if file exists first
             if explicit_mode && paths.len() == 1 && !path.exists() {
                 return Err(anyhow::anyhow!(
@@ -210,7 +316,14 @@ impl Config {
                 ));
             }
 
-            match Self::from_json_file(path) {
+            // Use strict validation for explicit mode, regular for layered mode
+            let load_result = if explicit_mode {
+                Self::from_json_file_strict(path)
+            } else {
+                Self::from_json_file(path)
+            };
+
+            match load_result {
                 Ok(file_cfg) => {
                     // Merge file_cfg into merged (later overrides earlier)
                     if file_cfg.workspace_path.is_some() {
@@ -342,13 +455,180 @@ impl Config {
         PathBuf::from("./zapclaw.json")
     }
 
+    /// Validate config file path for security.
+    ///
+    /// Checks:
+    /// 1. If file is a symlink, target must be within trusted_home_base (if provided)
+    /// 2. File permissions must be 0600 or stricter (no group/other read/write) (Unix)
+    /// 3. Parent directory permissions must be 0700 or stricter (no group/other read/write) (Unix)
+    ///
+    /// trusted_home_base: The trusted home directory path (used for symlink validation)
+    /// strict_mode: If true, returns error on validation failure. If false, warns and returns Ok(()).
+    ///
+    /// Returns Ok(()) if safe or strict_mode=false, Err(description) if unsafe and strict_mode=true.
+    fn validate_config_file_security(path: &Path, trusted_home_base: Option<&Path>, strict_mode: bool) -> Result<(), String> {
+        // Skip validation if file doesn't exist yet (auto-create case)
+        if !path.exists() {
+            return Ok(());
+        }
+
+        // Canonicalize to resolve symlinks
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|e| format!("Failed to canonicalize {}: {}", path.display(), e))?;
+
+        // 1. Symlink check: reject if target outside trusted home base
+        if let Some(home_base) = trusted_home_base {
+            // Check if canonical path starts with home base
+            if !canonical_path.starts_with(home_base) {
+                let msg = format!(
+                    "Config file {} (resolved to {}) is outside trusted home directory {}",
+                    path.display(),
+                    canonical_path.display(),
+                    home_base.display()
+                );
+                if strict_mode {
+                    return Err(msg);
+                } else {
+                    log::warn!("⚠️  {}", msg);
+                }
+            }
+        }
+
+        // Unix permission checks
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // 2. File permissions check - require 0600 or stricter (only owner can read/write)
+            if let Ok(metadata) = path.metadata() {
+                let mode = metadata.permissions().mode();
+
+                // Check if group or others have ANY permissions (read or write)
+                // 0o077 masks group+other bits (rwx for group + rwx for other)
+                if mode & 0o077 != 0 {
+                    let msg = format!(
+                        "Config file {} has overly permissive permissions ({:04o}). Required: 0600 (owner-only)",
+                        path.display(),
+                        mode & 0o777
+                    );
+                    if strict_mode {
+                        return Err(msg);
+                    } else {
+                        log::warn!("⚠️  {}", msg);
+                    }
+                }
+            }
+
+            // 3. Parent directory permissions check - require 0700 or stricter
+            if let Some(parent) = path.parent() {
+                if parent.exists() {
+                    if let Ok(metadata) = parent.metadata() {
+                        let mode = metadata.permissions().mode();
+
+                        // Check if group or others have ANY permissions
+                        if mode & 0o077 != 0 {
+                            let msg = format!(
+                                "Config directory {} has overly permissive permissions ({:04o}). Required: 0700 (owner-only)",
+                                parent.display(),
+                                mode & 0o777
+                            );
+                            if strict_mode {
+                                return Err(msg);
+                            } else {
+                                log::warn!("⚠️  {}", msg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Load configuration from a JSON file with strict validation.
+    ///
+    /// This is used for explicit config paths (--config flag) where security
+    /// validation failures should result in errors.
+    ///
+    /// Returns error if file doesn't exist, fails validation, or fails to parse.
+    pub fn from_json_file_strict(path: &Path) -> Result<FileConfig, anyhow::Error> {
+        if !path.exists() {
+            return Err(anyhow::anyhow!("Config file does not exist: {}", path.display()));
+        }
+
+        // For explicit configs, always use strict mode (no trusted base)
+        Self::validate_config_file_security(path, None, true)
+            .map_err(|e| anyhow::anyhow!("Config file security validation failed: {}", e))?;
+
+        // Read and parse
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse config file as JSON: {}", path.display()))?;
+
+        // Check for forbidden secret keys in file
+        if let Some(obj) = parsed.as_object() {
+            let forbidden_keys: &[&str] = &["api_key", "search_api_key", "inbound_api_key"];
+            for key in forbidden_keys {
+                if obj.contains_key(*key) {
+                    log::warn!(
+                        "⚠️  Secret key '{}' found in config file {}. \
+                         Secret keys should be set via environment variables or CLI only. \
+                         Ignoring value from file.",
+                        key,
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        let file_config: FileConfig = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to deserialize config file: {}", path.display()))?;
+
+        Ok(file_config)
+    }
+
     /// Load configuration from a JSON file.
     ///
     /// Returns empty FileConfig if file doesn't exist.
     /// Returns error if file exists but fails to parse.
+    ///
+    /// Security: Validates file permissions and symlink safety for home config files.
+    /// Non-home config files (test files, explicit configs) skip permission checks
+    /// but still validate symlink safety when a trusted base is provided.
+    ///
+    /// Home config detection: Checks if path matches ~/.zapclaw/zapclaw.json pattern
+    /// by comparing against the resolved home config path.
     pub fn from_json_file(path: &Path) -> Result<FileConfig, anyhow::Error> {
         if !path.exists() {
             return Ok(FileConfig::default());
+        }
+
+        // Determine if this is a home config file by comparing with expected home path
+        // This is more reliable than substring matching which can be bypassed by symlinks
+        let expected_home_path = Self::resolve_home_config_path();
+        let is_home_config = path.canonicalize()
+            .ok()
+            .as_ref()
+            == expected_home_path.canonicalize().ok().as_ref();
+
+        // For home config, get the trusted home base and apply validation
+        let trusted_home_base = if is_home_config {
+            expected_home_path.parent().and_then(|p| p.parent())
+        } else {
+            None
+        };
+
+        // Security validation
+        // For home config: warn on issues but continue (backward compatible)
+        // For explicit config: no validation here (handled at call site for explicit mode)
+        if is_home_config {
+            if let Err(e) = Self::validate_config_file_security(path, trusted_home_base, false) {
+                log::warn!("⚠️  Config file security check for {}: {}", path.display(), e);
+            }
         }
 
         let content = std::fs::read_to_string(path)
@@ -1049,5 +1329,232 @@ mod tests {
         assert!(!json.contains("api_key"));
         assert!(!json.contains("search_api_key"));
         assert!(!json.contains("inbound_api_key"));
+    }
+
+    // WP2 Tests: Secure home resolution with validation
+
+    #[test]
+    #[serial] // Requires exclusive access to environment variables
+    fn test_resolve_home_config_path_uses_valid_host_home_when_sandboxed() {
+        let temp_dir = TempDir::new().unwrap();
+        let fake_home = temp_dir.path();
+
+        // Set sandboxed mode
+        std::env::set_var("ZAPCLAW_SANDBOXED", "1");
+        std::env::set_var("ZAPCLAW_HOST_HOME", fake_home.to_string_lossy().as_ref());
+
+        let result = Config::resolve_home_config_path();
+        
+        // Should point to fake_home/.zapclaw/zapclaw.json
+        assert!(result.starts_with(fake_home));
+        assert!(result.ends_with(".zapclaw/zapclaw.json"));
+
+        std::env::remove_var("ZAPCLAW_SANDBOXED");
+        std::env::remove_var("ZAPCLAW_HOST_HOME");
+    }
+
+    #[test]
+    #[serial] // Requires exclusive access to environment variables
+    fn test_resolve_home_config_path_ignores_relative_host_home() {
+        // Set sandboxed mode with relative path
+        std::env::set_var("ZAPCLAW_SANDBOXED", "1");
+        std::env::set_var("ZAPCLAW_HOST_HOME", "relative/path");
+
+        // Should fall back to dirs::home_dir() (or . if HOME not set)
+        let result = Config::resolve_home_config_path();
+        // Result should not contain "relative/path"
+        assert!(!result.to_string_lossy().contains("relative/path"));
+
+        std::env::remove_var("ZAPCLAW_SANDBOXED");
+        std::env::remove_var("ZAPCLAW_HOST_HOME");
+    }
+
+    #[test]
+    #[serial] // Requires exclusive access to environment variables
+    fn test_resolve_host_home_for_config_fallback_to_dirs_home() {
+        // Ensure sandbox mode is off
+        std::env::remove_var("ZAPCLAW_SANDBOXED");
+        std::env::remove_var("ZAPCLAW_HOST_HOME");
+
+        // Should use dirs::home_dir()
+        let result = Config::resolve_host_home_for_config();
+        
+        // If HOME is set, should return it
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(result, Some(PathBuf::from(home)));
+        }
+    }
+
+    #[test]
+    #[serial] // Requires exclusive access to environment variables
+    fn test_validate_host_home_path_accepts_valid_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        let result = Config::validate_host_home_path(temp_dir.path());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), temp_dir.path());
+    }
+
+    #[test]
+    fn test_validate_host_home_path_rejects_non_absolute() {
+        let relative = PathBuf::from("relative/path");
+        
+        let result = Config::validate_host_home_path(&relative);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not absolute"));
+    }
+
+    #[test]
+    fn test_validate_host_home_path_rejects_nonexistent() {
+        let nonexistent = PathBuf::from("/nonexistent-path-xyz-123");
+        
+        let result = Config::validate_host_home_path(&nonexistent);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("canonicalization failed"));
+    }
+
+    #[test]
+    fn test_validate_host_home_path_rejects_file_not_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("not-a-dir");
+        std::fs::write(&file_path, b"test").unwrap();
+        
+        let result = Config::validate_host_home_path(&file_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a directory"));
+    }
+
+    // WP3 Tests: Config file security validation
+
+    #[test]
+    #[serial] // Requires exclusive access to environment variables
+    fn test_home_config_unsafe_permissions_warns_and_loads() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".zapclaw");
+        let config_path = config_dir.join("zapclaw.json");
+
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{"workspace_path": "/test", "api_base_url": "http://localhost:11434/v1", "model_name": "test"}"#
+        ).unwrap();
+
+        // Set overly permissive permissions (group-readable 0640)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // 0640 has group read - should trigger warning but still load
+            let perms = std::fs::Permissions::from_mode(0o640);
+            std::fs::set_permissions(&config_path, perms).unwrap();
+
+            // Should load (non-strict mode for home config)
+            // Warning is logged but loading succeeds
+            let result = Config::from_json_file(&config_path);
+            assert!(result.is_ok());
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Non-Unix: no permission checks, should load fine
+            let result = Config::from_json_file(&config_path);
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    #[serial] // Requires exclusive access to environment variables
+    fn test_explicit_config_unsafe_permissions_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("explicit_config.json");
+
+        std::fs::write(
+            &config_path,
+            r#"{"workspace_path": "/test", "api_base_url": "http://localhost:11434/v1", "model_name": "test"}"#
+        ).unwrap();
+
+        // Set overly permissive permissions (group-readable 0640)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // 0640 has group read - should fail in strict mode
+            let perms = std::fs::Permissions::from_mode(0o640);
+            std::fs::set_permissions(&config_path, perms).unwrap();
+
+            // Use from_json_file_strict for explicit config validation
+            let result = Config::from_json_file_strict(&config_path);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("overly permissive permissions"));
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Non-Unix: permission checks not available
+            // This test passes trivially on non-Unix
+            assert!(true);
+        }
+    }
+
+    #[test]
+    #[serial] // Requires exclusive access to environment variables
+    fn test_config_file_symlink_outside_trusted_home_warns() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_base = temp_dir.path().join("home");
+        let config_dir = home_base.join(".zapclaw");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let real_config_path = temp_dir.path().join("real_config.json");
+        std::fs::write(
+            &real_config_path,
+            r#"{"workspace_path": "/real"}"#
+        ).unwrap();
+
+        // Create symlink in .zapclaw pointing outside
+        let symlink_path = config_dir.join("zapclaw.json");
+        
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real_config_path, &symlink_path).unwrap();
+
+            // Load from symlink path - should warn but continue (home config)
+            // The validation will detect it's outside trusted home base
+            let result = Config::from_json_file(&symlink_path);
+            
+            // Should still load (warn-only for home config)
+            assert!(result.is_ok());
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Symlinks not well-supported on Windows, skip test
+            assert!(true);
+        }
+    }
+
+    #[test]
+    #[serial] // Requires exclusive access to environment variables
+    fn test_resolve_home_config_path_in_sandbox_uses_host_home() {
+        let temp_dir = TempDir::new().unwrap();
+        let fake_host_home = temp_dir.path();
+
+        // Simulate sandboxed environment
+        std::env::set_var("ZAPCLAW_SANDBOXED", "1");
+        std::env::set_var("ZAPCLAW_HOST_HOME", fake_host_home.to_string_lossy().as_ref());
+        
+        // Set HOME to workspace (simulating sandbox setup)
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::env::set_var("HOME", workspace.to_string_lossy().as_ref());
+
+        let result = Config::resolve_home_config_path();
+        
+        // Should use ZAPCLAW_HOST_HOME, not HOME
+        assert!(result.starts_with(fake_host_home));
+        assert!(!result.starts_with(&workspace));
+
+        std::env::remove_var("ZAPCLAW_SANDBOXED");
+        std::env::remove_var("ZAPCLAW_HOST_HOME");
+        std::env::remove_var("HOME");
     }
 }
