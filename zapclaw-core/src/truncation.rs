@@ -18,6 +18,14 @@ pub const MIN_KEEP_CHARS: usize = 2_000;
 /// Suffix appended after truncation.
 pub const TRUNCATION_SUFFIX: &str = "\n\n[Content truncated — original was too large for the model's context window. The content above is a partial view. If you need more, request specific sections or use offset/limit parameters to read smaller chunks.]";
 
+// ── Context Window Guard ────────────────────────────────────────────────
+
+/// Hard block: refuse to start a run when fewer than this many tokens remain.
+pub const CONTEXT_GUARD_BLOCK_REMAINING_TOKENS: usize = 16_000;
+
+/// Soft warn: log a warning when fewer than this many tokens remain.
+pub const CONTEXT_GUARD_WARN_REMAINING_TOKENS: usize = 32_000;
+
 // ── Tool Result Truncation ──────────────────────────────────────────────
 
 /// Calculate the maximum allowed characters for a single tool result.
@@ -49,25 +57,98 @@ pub fn truncate_tool_result(text: &str, max_chars: usize) -> String {
 
 // ── History Truncation ──────────────────────────────────────────────────
 
-/// Estimate tokens from a character count (~4 chars/token).
-fn estimate_tokens_from_chars(chars: usize) -> usize {
-    (chars + 3) / 4
+// ── Content-type detectors (private) ──────────────────────────────────
+
+fn is_base64_like(sample: &str) -> bool {
+    let s = sample.trim();
+    s.len() > 50
+        && s.chars().take(50).all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        && !s.contains(' ')
+        && !s.contains('\n')
+}
+
+fn is_json_like(sample: &str) -> bool {
+    let s = sample.trim_start();
+    (s.starts_with('{') || s.starts_with('[') || s.starts_with('"'))
+        && (s.contains(':') || s.contains(','))
+}
+
+fn is_code_like(sample: &str) -> bool {
+    sample.matches("=>").count()
+        + sample.matches("fn ").count()
+        + sample.matches("def ").count()
+        + sample.matches("function ").count()
+        + sample.matches("    ").count()   // 4-space indent
+        + sample.matches("->").count()
+        > 3
+}
+
+/// Content-aware token estimator.
+/// Ratios: base64 ~1.33 ch/tok, JSON ~3 ch/tok, code ~3.5 ch/tok, prose ~4 ch/tok.
+pub fn estimate_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let byte_len   = text.len();
+    let char_count = text.chars().count();
+    let non_ascii  = byte_len.saturating_sub(char_count);
+    let sample     = &text[..byte_len.min(256)];
+
+    let base = if is_base64_like(sample) {
+        (char_count * 3 + 3) / 4       // ~1.33 chars/token
+    } else if is_json_like(sample) {
+        (char_count + 2) / 3           // ~3 chars/token
+    } else if is_code_like(sample) {
+        (char_count * 2 + 6) / 7      // ~3.5 chars/token
+    } else {
+        (char_count + 3) / 4           // ~4 chars/token (prose default)
+    };
+
+    (base + non_ascii / 4).max(1)      // UTF-8 multi-byte overhead
+}
+
+/// Token estimate for one ChatMessage including role/structure overhead.
+pub fn estimate_message_tokens(msg: &ChatMessage) -> usize {
+    const ROLE_OVERHEAD: usize = 4;
+    let content_tokens = estimate_tokens(&msg.content);
+    let tool_tokens = msg.tool_calls.as_ref().map_or(0, |tcs| {
+        tcs.iter()
+            .map(|tc| {
+                6 + estimate_tokens(&tc.function.name)
+                    + estimate_tokens(&tc.function.arguments)
+            })
+            .sum::<usize>()
+    });
+    ROLE_OVERHEAD + content_tokens + tool_tokens
 }
 
 /// Estimate total tokens in a messages array.
 pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> usize {
-    messages
-        .iter()
-        .map(|m| {
-            let mut chars = m.content.len();
-            if let Some(ref tc) = m.tool_calls {
-                for call in tc {
-                    chars += call.function.name.len() + call.function.arguments.len();
-                }
-            }
-            estimate_tokens_from_chars(chars)
-        })
-        .sum()
+    const REQUEST_OVERHEAD: usize = 3;
+    REQUEST_OVERHEAD + messages.iter().map(estimate_message_tokens).sum::<usize>()
+}
+
+/// Result of evaluating the context window guard before a run begins.
+pub struct ContextGuardResult {
+    pub should_block:     bool,
+    pub should_warn:      bool,
+    pub estimated_tokens: usize,
+    pub remaining_tokens: usize,
+}
+
+/// Evaluate context window headroom before a run begins.
+pub fn evaluate_context_window_guard(
+    messages: &[ChatMessage],
+    context_window_tokens: usize,
+) -> ContextGuardResult {
+    let estimated = estimate_messages_tokens(messages);
+    let remaining = context_window_tokens.saturating_sub(estimated);
+    ContextGuardResult {
+        should_block: remaining < CONTEXT_GUARD_BLOCK_REMAINING_TOKENS,
+        should_warn:  remaining < CONTEXT_GUARD_WARN_REMAINING_TOKENS,
+        estimated_tokens: estimated,
+        remaining_tokens: remaining,
+    }
 }
 
 /// Truncate conversation history to fit within a token budget.
@@ -113,7 +194,10 @@ pub fn truncate_history(
         result.remove(1);
     }
 
-    // Repair orphaned tool results
+    // Repair tool-call / tool-result pairing (both directions):
+    // 1. Remove tool_calls entries in assistant messages with no matching tool result
+    // 2. Remove tool result messages with no matching tool_call in any assistant message
+    repair_orphaned_tool_uses(&mut result);
     repair_orphaned_tool_results(&mut result);
 
     result
@@ -147,6 +231,48 @@ pub fn repair_orphaned_tool_results(messages: &mut Vec<ChatMessage>) {
     });
 }
 
+/// Repair orphaned tool_calls in assistant messages after truncation.
+///
+/// When truncation removes a `tool` result message, the corresponding
+/// `tool_calls` entry in the preceding assistant message becomes orphaned —
+/// the OpenAI API requires every `tool_calls` entry to have a matching
+/// `tool` result, or it returns a validation error.
+///
+/// This function removes such orphaned entries. If an assistant message ends
+/// up with an empty `tool_calls` list AND no text content, the whole message
+/// is removed.
+pub fn repair_orphaned_tool_uses(messages: &mut Vec<ChatMessage>) {
+    use std::collections::HashSet;
+
+    // Collect all tool_call_ids that have a matching tool result.
+    let answered_ids: HashSet<String> = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .flat_map(|m| m.tool_call_id.iter().cloned())
+        .collect();
+
+    // For each assistant message, prune tool_calls that have no answer.
+    for msg in messages.iter_mut() {
+        if msg.role != "assistant" {
+            continue;
+        }
+        if let Some(ref mut tool_calls) = msg.tool_calls {
+            tool_calls.retain(|tc| answered_ids.contains(&tc.id));
+            if tool_calls.is_empty() {
+                msg.tool_calls = None;
+            }
+        }
+    }
+
+    // Remove assistant messages that are now empty (no text and no tool_calls).
+    messages.retain(|m| {
+        if m.role == "assistant" && m.tool_calls.is_none() && m.content.trim().is_empty() {
+            return false;
+        }
+        true
+    });
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -160,6 +286,7 @@ mod tests {
             content: content.to_string(),
             tool_call_id: None,
             tool_calls: None,
+            images: None,
         }
     }
 
@@ -169,6 +296,7 @@ mod tests {
             content: content.to_string(),
             tool_call_id: Some(call_id.to_string()),
             tool_calls: None,
+            images: None,
         }
     }
 
@@ -190,6 +318,7 @@ mod tests {
                     })
                     .collect(),
             ),
+            images: None,
         }
     }
 
@@ -284,12 +413,148 @@ mod tests {
     }
 
     #[test]
+    fn test_repair_orphaned_tool_uses_removes_unmatched_call() {
+        // Assistant calls [call_1, call_2] but only call_1's result is present
+        let mut messages = vec![
+            msg("system", "prompt"),
+            msg("user", "test"),
+            assistant_with_tool_calls(&["call_1", "call_2"]),
+            tool_msg("result 1", "call_1"),
+            // call_2 result was truncated away
+        ];
+        repair_orphaned_tool_uses(&mut messages);
+        // call_2 should be removed from tool_calls
+        let asst = messages.iter().find(|m| m.role == "assistant").unwrap();
+        let tc = asst.tool_calls.as_ref().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0].id, "call_1");
+    }
+
+    #[test]
+    fn test_repair_orphaned_tool_uses_removes_empty_assistant() {
+        // Assistant has only tool_calls with no text content, and all results are gone
+        let mut messages = vec![
+            msg("system", "prompt"),
+            msg("user", "test"),
+            assistant_with_tool_calls(&["call_1"]),
+            // tool result for call_1 was truncated away
+        ];
+        repair_orphaned_tool_uses(&mut messages);
+        // Empty assistant message (no text, no remaining tool_calls) should be removed
+        assert!(messages.iter().all(|m| m.role != "assistant"),
+            "empty assistant message should be removed");
+    }
+
+    #[test]
+    fn test_repair_orphaned_tool_uses_keeps_assistant_with_content() {
+        // Assistant has text content AND tool_calls, only tool_calls removed
+        let mut messages = vec![
+            msg("system", "prompt"),
+            msg("user", "test"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Let me think...".to_string(),
+                tool_call_id: None,
+                tool_calls: Some(vec![crate::llm::ToolCall {
+                    id: "call_1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::llm::FunctionCall {
+                        name: "test".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                images: None,
+            },
+            // call_1 result is gone
+        ];
+        repair_orphaned_tool_uses(&mut messages);
+        // Assistant message should remain (has text content), just with no tool_calls
+        let asst = messages.iter().find(|m| m.role == "assistant").unwrap();
+        assert!(asst.tool_calls.is_none());
+        assert_eq!(asst.content, "Let me think...");
+    }
+
+    #[test]
+    fn test_truncate_history_repairs_both_directions() {
+        // After truncation both orphaned tool_uses and orphaned tool_results are cleaned up
+        let mut messages = vec![msg("system", "System")];
+        // Add many turns to force truncation
+        for i in 0..20 {
+            messages.push(msg("user", &format!("msg {} {}", i, "x".repeat(300))));
+            messages.push(assistant_with_tool_calls(&[&format!("call_{}", i)]));
+            messages.push(tool_msg(&format!("result {}", i), &format!("call_{}", i)));
+        }
+        let result = truncate_history(&messages, 200, 1);
+        // Verify consistency: every tool msg has a matching assistant tool_call
+        let answered: std::collections::HashSet<String> = result
+            .iter()
+            .filter(|m| m.role == "tool")
+            .flat_map(|m| m.tool_call_id.iter().cloned())
+            .collect();
+        for m in &result {
+            if let Some(ref tcs) = m.tool_calls {
+                for tc in tcs {
+                    assert!(answered.contains(&tc.id),
+                        "tool_call {} in assistant message has no matching result", tc.id);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_estimate_messages_tokens() {
         let messages = vec![
-            msg("system", "1234"), // 4 chars = ~1 token
-            msg("user", "12345678"), // 8 chars = ~2 tokens
+            msg("system", "1234"),    // 4 chars prose
+            msg("user", "12345678"), // 8 chars prose
         ];
         let tokens = estimate_messages_tokens(&messages);
-        assert!(tokens >= 2);
+        // With per-message overhead (4 each) + request overhead (3): at least 11
+        assert!(tokens >= 11);
+    }
+
+    #[test]
+    fn test_estimate_tokens_json_denser_than_prose() {
+        let json = r#"{"key": "value", "number": 42, "arr": [1,2,3]}"#;
+        // JSON ratio ~3 chars/token vs prose ~4 chars/token → more tokens for same length
+        let prose_est = (json.len() + 3) / 4;
+        assert!(estimate_tokens(json) >= prose_est);
+    }
+
+    #[test]
+    fn test_estimate_tokens_base64_densest() {
+        let b64 = "SGVsbG8gV29ybGQhIFRoaXMgaXMgYSBsb25nZXIgYmFzZTY0IHN0cmluZw==";
+        // base64 ratio ~1.33 chars/token → more tokens than JSON (~3 chars/token)
+        let json_est = (b64.len() + 2) / 3;
+        assert!(estimate_tokens(b64) >= json_est);
+    }
+
+    #[test]
+    fn test_context_guard_block() {
+        let big = "x".repeat(64_000); // ~16K tokens prose
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: big,
+            tool_call_id: None,
+            tool_calls: None,
+            images: None,
+        }];
+        let r = evaluate_context_window_guard(&msgs, 17_000);
+        assert!(r.should_block);
+    }
+
+    #[test]
+    fn test_context_guard_warn_not_block() {
+        let medium = "x".repeat(28_000); // ~7K tokens prose
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: medium,
+            tool_call_id: None,
+            tool_calls: None,
+            images: None,
+        }];
+        // 38K context − ~7K used = ~31K remaining → warn (< 32K), not block (> 16K)
+        let r = evaluate_context_window_guard(&msgs, 38_000);
+        assert!(r.should_warn);
+        assert!(!r.should_block);
     }
 }

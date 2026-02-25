@@ -16,5 +16,14 @@
     "total_tokens": 0,
     "compaction_count": 0,
     "message_count": 0
+  },
+  {
+    "id": "bf3e4781-e5a1-4b07-9834-e2b7fe4582d8",
+    "created_at": "2026-02-18T19:47:29.343273771+00:00",
+    "updated_at": "2026-02-18T19:47:29.343280123+00:00",
+    "model": "phi3:mini",
+    "total_tokens": 0,
+    "compaction_count": 0,
+    "message_count": 0
   }
 ]

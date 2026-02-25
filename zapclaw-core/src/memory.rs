@@ -4,7 +4,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
+use std::collections::HashMap;
 
 // ── Constants (matching OpenClaw) ───────────────────────────────────────
 
@@ -18,13 +19,67 @@ const SNIPPET_MAX_CHARS: usize = 700;
 const DEFAULT_CHUNK_TOKENS: usize = 512;
 const DEFAULT_CHUNK_OVERLAP: usize = 50;
 
+// ── sqlite-vec Extension (P2-4) ────────────────────────────────────────
+
+static VEC_EXT_INIT: Once = Once::new();
+
+/// Register sqlite-vec as an auto-extension (loaded on every new connection).
+/// Uses sqlite3_auto_extension via FFI, which does NOT require SQLITE_ENABLE_LOAD_EXTENSION.
+fn register_sqlite_vec() {
+    VEC_EXT_INIT.call_once(|| {
+        // Register sqlite-vec as an auto-extension — loaded on every new connection.
+        // This does NOT require SQLITE_ENABLE_LOAD_EXTENSION (not loading from disk).
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(
+                std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ())
+            ));
+        }
+        log::debug!("sqlite-vec auto-extension registered");
+    });
+}
+
+/// Deterministic TEXT→i64 mapping for chunk IDs (for chunks_vec rowid).
+fn chunk_id_to_vec_rowid(id: &str) -> i64 {
+    let hash = hash_text(id); // hex SHA256 string
+    let n = u64::from_str_radix(&hash[..16.min(hash.len())], 16).unwrap_or(0);
+    (n >> 1) as i64 // shift right to ensure positive i64
+}
+
+/// Convert f32 vector to little-endian bytes (for sqlite-vec storage).
+fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Upsert a chunk embedding into chunks_vec table.
+///
+/// sqlite-vec's vec0 virtual tables do NOT support INSERT OR REPLACE / ON CONFLICT,
+/// so we use an explicit DELETE + INSERT pattern to achieve idempotent upsert.
+fn upsert_chunk_vec(db: &Connection, chunk_id: &str, embedding: &[f32]) -> Result<()> {
+    let rowid = chunk_id_to_vec_rowid(chunk_id);
+    let blob = vec_to_blob(embedding);
+    // Delete any existing row with this deterministic rowid before inserting.
+    db.execute("DELETE FROM chunks_vec WHERE rowid = ?", [rowid])?;
+    db.execute(
+        "INSERT INTO chunks_vec(rowid, embedding, chunk_id) VALUES (?1, ?2, ?3)",
+        params![rowid, blob, chunk_id],
+    )?;
+    Ok(())
+}
+
+/// Delete a chunk embedding from chunks_vec table.
+fn delete_chunk_vec(db: &Connection, chunk_id: &str) -> Result<()> {
+    let rowid = chunk_id_to_vec_rowid(chunk_id);
+    db.execute("DELETE FROM chunks_vec WHERE rowid = ?", [rowid])?;
+    Ok(())
+}
+
 // ── Types ───────────────────────────────────────────────────────────────
 
 /// File-based + SQLite-indexed memory system — exact OpenClaw parity.
 ///
 /// Dual storage architecture:
 /// 1. MEMORY.md + memory/*.md — user-editable markdown files (source of truth)
-/// 2. SQLite index database — files, chunks, chunks_fts (FTS5), embedding_cache
+/// 2. SQLite index database — files, chunks, chunks_fts (FTS5), embedding_cache, chunks_vec (sqlite-vec)
 ///
 /// Search pipeline:
 ///   Files → chunkMarkdown → embedBatch → SQLite → hybrid search (BM25 + vector)
@@ -35,6 +90,7 @@ pub struct MemoryDb {
     chunk_tokens: usize,
     chunk_overlap: usize,
     fts_available: bool,
+    vec_available: bool, // true if sqlite-vec extension loaded and schema created
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,13 +121,6 @@ pub struct MemorySearchResult {
 /// Progress callback for sync pipeline.
 pub type SyncProgressFn = Box<dyn Fn(usize, usize, &str) + Send + Sync>;
 
-/// Compaction metadata tracked in SQLite meta table.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CompactionMeta {
-    pub compaction_count: usize,
-    pub last_compact_at: Option<String>,
-}
-
 /// Internal chunk produced by markdown chunking.
 #[derive(Debug, Clone)]
 struct MemoryChunk {
@@ -101,15 +150,18 @@ pub struct IndexMeta {
     pub last_sync_at: Option<String>, // ISO 8601 timestamp
 }
 
+/// Result of a conversation history compaction (returned by `Agent::compact_session`).
 #[derive(Debug, Clone)]
 pub struct CompactionResult {
+    /// Number of messages summarised away.
     pub files_compacted: usize,
+    /// Characters freed by the compaction.
     pub chars_freed: usize,
-    /// LLM-generated summary (only set when compact_llm was used)
+    /// LLM-generated summary text.
     pub summary: Option<String>,
-    /// Token count before compaction
+    /// Approximate token count before compaction.
     pub tokens_before: Option<usize>,
-    /// Token count after compaction
+    /// Approximate token count after compaction.
     pub tokens_after: Option<usize>,
 }
 
@@ -178,6 +230,53 @@ fn ensure_schema(db: &Connection) -> bool {
         .is_ok();
 
     fts_ok
+}
+
+/// Ensure sqlite-vec virtual table schema exists (for vector KNN search).
+fn ensure_vec_schema(db: &Connection, dims: usize) -> Result<bool> {
+    if dims == 0 {
+        return Ok(false);
+    }
+
+    db.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS {VECTOR_TABLE} USING vec0(
+            embedding float[{dims}] distance_metric=cosine,
+            +chunk_id text
+        );"
+    )).context("Failed to create chunks_vec table")?;
+
+    log::debug!("sqlite-vec chunks_vec table created (dims={})", dims);
+    Ok(true)
+}
+
+/// Migrate existing chunk embeddings to chunks_vec table.
+/// Called on startup when sqlite-vec is first enabled.
+fn migrate_existing_to_vec(db: &Connection) -> Result<usize> {
+    // Query all chunks with embeddings
+    let mut stmt = db.prepare("SELECT id, embedding FROM chunks WHERE embedding != '[]'")?;
+
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+
+    let mut migrated = 0usize;
+    for row in rows {
+        let (chunk_id, emb_json) = row?;
+        let emb: Vec<f32> = serde_json::from_str(&emb_json).unwrap_or_default();
+        if !emb.is_empty() {
+            if let Err(e) = upsert_chunk_vec(db, &chunk_id, &emb) {
+                log::warn!("Failed to migrate chunk {} to vec: {}", chunk_id, e);
+            } else {
+                migrated += 1;
+            }
+        }
+    }
+
+    if migrated > 0 {
+        log::info!("Migrated {} existing chunks to chunks_vec", migrated);
+    }
+
+    Ok(migrated)
 }
 
 // ── Hashing ─────────────────────────────────────────────────────────────
@@ -378,24 +477,14 @@ impl EmbeddingProvider {
             return Ok(Vec::new());
         }
 
+        const MAX_ATTEMPTS: usize = 3;
+        const RETRY_DELAYS_MS: [u64; 2] = [500, 1500];
+
         let url = format!("{}/embeddings", self.base_url);
         let body = serde_json::json!({
             "model": self.model,
             "input": texts,
         });
-
-        let mut req = self.client.post(&url).json(&body);
-        if let Some(ref key) = self.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let resp = req.send().await.context("Embedding API request failed")?;
-        let status = resp.status();
-        let body_text = resp.text().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Embedding API error ({}): {}", status, &body_text[..body_text.len().min(200)]);
-        }
 
         #[derive(Deserialize)]
         struct EmbeddingResponse {
@@ -406,18 +495,74 @@ impl EmbeddingProvider {
             embedding: Vec<f32>,
         }
 
-        let parsed: EmbeddingResponse = serde_json::from_str(&body_text)
-            .context("Failed to parse embedding response")?;
+        let mut last_err = anyhow::anyhow!("embed_batch: no attempts made");
 
-        // Apply Matryoshka projection to all embeddings
-        let mut projected = Vec::with_capacity(parsed.data.len());
-        for item in parsed.data {
-            let proj = project_matryoshka(&item.embedding, self.target_dims)
-                .context("Failed to project embedding")?;
-            projected.push(proj);
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                let delay = RETRY_DELAYS_MS[attempt - 1];
+                log::warn!(
+                    "Embedding attempt {}/{} failed, retrying in {}ms...",
+                    attempt, MAX_ATTEMPTS, delay
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+
+            let mut req = self.client.post(&url).json(&body);
+            if let Some(ref key) = self.api_key {
+                req = req.header("Authorization", format!("Bearer {}", key));
+            }
+
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    // Network-level error — eligible for retry
+                    last_err = anyhow::anyhow!("Embedding API request failed: {}", e);
+                    continue;
+                }
+            };
+
+            let status = resp.status();
+            let body_text = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    last_err = anyhow::anyhow!("Failed to read embedding response body: {}", e);
+                    continue;
+                }
+            };
+
+            if !status.is_success() {
+                // 4xx client errors — do not retry, propagate immediately
+                if status.is_client_error() {
+                    anyhow::bail!(
+                        "Embedding API client error ({}): {}",
+                        status,
+                        &body_text[..body_text.len().min(200)]
+                    );
+                }
+                // 5xx server errors — retry
+                last_err = anyhow::anyhow!(
+                    "Embedding API server error ({}): {}",
+                    status,
+                    &body_text[..body_text.len().min(200)]
+                );
+                continue;
+            }
+
+            let parsed: EmbeddingResponse = serde_json::from_str(&body_text)
+                .context("Failed to parse embedding response")?;
+
+            // Apply Matryoshka projection to all embeddings
+            let mut projected = Vec::with_capacity(parsed.data.len());
+            for item in parsed.data {
+                let proj = project_matryoshka(&item.embedding, self.target_dims)
+                    .context("Failed to project embedding")?;
+                projected.push(proj);
+            }
+
+            return Ok(projected);
         }
 
-        Ok(projected)
+        Err(last_err)
     }
 
     /// Get embedding for a single query with Matryoshka projection.
@@ -468,6 +613,38 @@ impl MemoryDb {
             log::warn!("FTS5 unavailable — keyword search disabled");
         }
 
+        // Register sqlite-vec extension (P2-4)
+        register_sqlite_vec();
+
+        // Create chunks_vec table if it doesn't exist (P2-4)
+        // Use default target_dims (512) for initial schema creation
+        let default_dims = 512usize;
+        let vec_available = match ensure_vec_schema(&conn, default_dims) {
+            Ok(available) => {
+                if available {
+                    // Migrate existing embeddings to chunks_vec
+                    match migrate_existing_to_vec(&conn) {
+                        Ok(n) => log::debug!("sqlite-vec migration: {} chunks", n),
+                        Err(e) => log::warn!("sqlite-vec migration failed (non-fatal): {}", e),
+                    }
+                }
+                available
+            }
+            Err(e) => {
+                log::warn!("sqlite-vec schema initialization failed (non-fatal): {}", e);
+                false
+            }
+        };
+
+        // Startup crash recovery: if a shadow table exists from a previously crashed
+        // reindex, drop it. The main embedding_cache is always left intact during
+        // reindex (shadow is built first, then atomically swapped), so this is safe.
+        if conn.execute_batch("DROP TABLE IF EXISTS embedding_cache_shadow").is_ok() {
+            // Check if it actually existed by querying sqlite_master before we dropped it.
+            // We just silently drop it regardless — DROP IF EXISTS is idempotent.
+            log::debug!("Startup: cleaned up any leftover embedding_cache_shadow table");
+        }
+
         Ok(Self {
             workspace: workspace.to_path_buf(),
             db: Mutex::new(conn),
@@ -475,6 +652,7 @@ impl MemoryDb {
             chunk_tokens: DEFAULT_CHUNK_TOKENS,
             chunk_overlap: DEFAULT_CHUNK_OVERLAP,
             fts_available,
+            vec_available,
         })
     }
 
@@ -537,6 +715,142 @@ impl MemoryDb {
         Ok(files)
     }
 
+    // ── Session Transcript Source (P1-3) ────────────────────────────────
+
+    /// List all session JSONL files in {workspace}/.sessions/
+    fn list_session_files(&self) -> Result<Vec<PathBuf>> {
+        let sessions_dir = self.workspace.join(".sessions");
+        if !sessions_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&sessions_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
+            .filter(|e| !e.path().is_symlink()) // security: skip symlinks
+            .map(|e| e.path())
+            .collect();
+
+        files.sort(); // deterministic ordering
+        Ok(files)
+    }
+
+    /// Build searchable text from a session JSONL file.
+    /// Filters to "user" and "assistant" roles only, collapses whitespace.
+    fn build_session_text(path: &Path) -> Result<Option<String>> {
+        use serde_json::Value;
+
+        let content = std::fs::read_to_string(path)?;
+        let mut lines = Vec::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Parse JSON: { "role": "...", "content": "..." }
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                if let (Some(role), Some(content)) = (
+                    value.get("role").and_then(|r| r.as_str()),
+                    value.get("content").and_then(|c| c.as_str()),
+                ) {
+                    // Only index user and assistant messages (skip header, system, tool)
+                    if role == "user" || role == "assistant" {
+                        // Normalize: collapse whitespace, replace newlines with space
+                        let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+                        lines.push(format!("{}: {}", role.to_uppercase(), normalized));
+                    }
+                }
+            }
+        }
+
+        if lines.is_empty() {
+            return Ok(None); // Empty session (no user/assistant content)
+        }
+
+        Ok(Some(lines.join("\n")))
+    }
+
+    /// Sync session transcript files as searchable memory (source="sessions").
+    /// Hash-based dedup: skips unchanged sessions.
+    pub fn sync_sessions(&self, model: &str, target_dims: usize) -> Result<usize> {
+        let session_files = self.list_session_files()?;
+        let mut synced = 0usize;
+
+        for session_path in &session_files {
+            // Build session text
+            let text = match Self::build_session_text(session_path)? {
+                Some(t) => t,
+                None => continue, // Skip empty sessions
+            };
+
+            // Compute content hash (not file hash)
+            let hash = hash_text(&text);
+
+            // Build relative path: "sessions/{filename}"
+            let filename = session_path.file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid session filename: {:?}", session_path))?;
+            let rel_path = format!("sessions/{}", filename);
+
+            // Check if unchanged
+            let existing_hash: Option<String> = self.db.lock().unwrap()
+                .prepare("SELECT hash FROM files WHERE path = ? AND source = 'sessions'")
+                .ok()
+                .and_then(|mut s| s.query_row(params![rel_path], |r| r.get(0)).ok());
+
+            if existing_hash.as_deref() == Some(&hash) {
+                continue; // Unchanged, skip
+            }
+
+            // Get file metadata
+            let meta = std::fs::metadata(session_path)?;
+            let mtime_ms = meta.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+
+            let entry = MemoryFileEntry {
+                path: rel_path.clone(),
+                hash,
+                mtime_ms,
+                size: meta.len() as i64,
+            };
+
+            // Index the session
+            self.index_file(&entry, &text, model, "sessions")?;
+            synced += 1;
+        }
+
+        // Cleanup: remove stale session entries (deleted files)
+        let active_paths: std::collections::HashSet<String> = session_files.iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .map(|n| format!("sessions/{}", n))
+            .collect();
+
+        let stale_paths: Vec<String> = {
+            let db = self.db.lock().unwrap();
+            let mut stmt = db.prepare("SELECT path FROM files WHERE source = 'sessions'")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        for stale_path in &stale_paths {
+            if !active_paths.contains(stale_path) {
+                self.remove_file_index(stale_path, "sessions")?;
+            }
+        }
+
+        // Update index metadata
+        if synced > 0 {
+            self.update_index_meta(model, target_dims)?;
+        }
+
+        Ok(synced)
+    }
+
     // ── Build File Entry (matching OpenClaw's buildFileEntry) ──────────
 
     fn build_file_entry(&self, rel_path: &str, abs_path: &Path) -> Result<MemoryFileEntry> {
@@ -561,10 +875,12 @@ impl MemoryDb {
     // ── Sync Pipeline (matching OpenClaw's syncMemoryFiles) ────────────
 
     /// Determine the source tag for a file path.
-    /// "memory" for MEMORY.md and memory/*.md, "custom" for docs/*.md and notes/*.md.
+    /// "memory" for MEMORY.md and memory/*.md, "custom" for docs/*.md and notes/*.md, "sessions" for sessions/*.jsonl.
     fn source_for_path(rel_path: &str) -> &'static str {
         if rel_path == "MEMORY.md" || rel_path.starts_with("memory/") {
             "memory"
+        } else if rel_path.starts_with("sessions/") {
+            "sessions"
         } else {
             "custom"
         }
@@ -578,6 +894,256 @@ impl MemoryDb {
         )?;
         log::info!("Cleared all chunk embeddings");
         Ok(())
+    }
+
+    /// Prune the embedding cache using LRU eviction when it exceeds `max_entries`.
+    ///
+    /// Deletes the oldest `(count - max_entries * 0.8)` entries by `updated_at`
+    /// to keep the cache below the soft target. Returns the number of entries pruned.
+    pub fn prune_embedding_cache_if_needed(&self, max_entries: usize) -> Result<usize> {
+        let db = self.db.lock().unwrap();
+
+        let count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM embedding_cache",
+            [],
+            |r| r.get(0),
+        )?;
+
+        if count as usize <= max_entries {
+            return Ok(0);
+        }
+
+        // Target: keep 80% of max_entries, delete the oldest entries
+        let target = (max_entries as f64 * 0.8) as usize;
+        let to_delete = (count as usize).saturating_sub(target);
+
+        let deleted = db.execute(
+            "DELETE FROM embedding_cache WHERE rowid IN \
+             (SELECT rowid FROM embedding_cache ORDER BY updated_at ASC LIMIT ?1)",
+            rusqlite::params![to_delete as i64],
+        )?;
+
+        if deleted > 0 {
+            log::info!(
+                "Embedding cache pruned: removed {} entries (was {}, target {})",
+                deleted, count, target
+            );
+        }
+        Ok(deleted)
+    }
+
+    // ── Crash-Safe Reindex (Shadow Table) ──────────────────────────────
+
+    /// Create the embedding shadow table for a crash-safe reindex.
+    ///
+    /// This drops any leftover shadow from a previous run and creates a fresh one.
+    /// All new embeddings are written here first. The live `embedding_cache` is
+    /// not touched until `swap_shadow_to_main()` commits the atomic swap.
+    pub fn create_embedding_shadow_table(&self) -> Result<()> {
+        self.db.lock().unwrap().execute_batch(&format!(
+            "DROP TABLE IF EXISTS embedding_cache_shadow;
+             CREATE TABLE embedding_cache_shadow (
+                 provider TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 provider_key TEXT NOT NULL,
+                 hash TEXT NOT NULL,
+                 embedding TEXT NOT NULL,
+                 dims INTEGER,
+                 updated_at INTEGER NOT NULL,
+                 PRIMARY KEY (provider, model, provider_key, hash)
+             );"
+        ))?;
+        log::debug!("Created embedding_cache_shadow table");
+        Ok(())
+    }
+
+    /// Build new embeddings into the shadow table without touching the live data.
+    ///
+    /// - Cache hits are copied from the existing `embedding_cache` (no API calls).
+    /// - Cache misses are sent to the embedding API and written into the shadow only.
+    /// - `chunks.embedding` and `embedding_cache` are NOT modified.
+    ///
+    /// Call `swap_shadow_to_main()` after this succeeds to atomically apply.
+    pub async fn embed_all_chunks_to_shadow(&self, provider: &EmbeddingProvider) -> Result<usize> {
+        // Read all chunks — after force-sync they will all have embedding='[]'.
+        let chunk_data: Vec<(String, String, String)> = {
+            let db = self.db.lock().unwrap();
+            let mut stmt = db.prepare("SELECT id, text, hash FROM chunks")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        if chunk_data.is_empty() {
+            return Ok(0);
+        }
+
+        let provider_key = hash_text(&format!(
+            "{}:{}:{}", provider.base_url, provider.model, provider.target_dims()
+        ));
+
+        let mut to_embed: Vec<(usize, String, String, String)> = Vec::new();
+        let mut cached_count = 0usize;
+
+        for (i, (_id, text, hash)) in chunk_data.iter().enumerate() {
+            // Check the LIVE embedding_cache for a cache hit (not the shadow).
+            let cached: Option<(String, Option<i64>)> = self.db.lock().unwrap()
+                .prepare(&format!(
+                    "SELECT embedding, dims FROM {} WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?",
+                    EMBEDDING_CACHE_TABLE
+                ))
+                .ok()
+                .and_then(|mut s| {
+                    s.query_row(
+                        params!["openai-compat", provider.model(), &provider_key, hash],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+                    )
+                    .ok()
+                });
+
+            if let Some((cached_emb, dims)) = cached {
+                // Copy cache hit into shadow table.
+                self.db.lock().unwrap().execute(
+                    "INSERT INTO embedding_cache_shadow
+                     (provider, model, provider_key, hash, embedding, dims, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(provider, model, provider_key, hash) DO UPDATE SET
+                       embedding=excluded.embedding, dims=excluded.dims, updated_at=excluded.updated_at",
+                    params![
+                        "openai-compat", provider.model(), &provider_key, hash,
+                        cached_emb, dims, Utc::now().timestamp_millis(),
+                    ],
+                )?;
+                cached_count += 1;
+            } else {
+                to_embed.push((i, String::new(), text.clone(), hash.clone()));
+            }
+        }
+
+        if to_embed.is_empty() {
+            log::info!("Shadow embed: all {} chunks served from cache", cached_count);
+            return Ok(cached_count);
+        }
+
+        // Batch-embed uncached chunks and write results to shadow only.
+        let batch_max_tokens = 8000usize;
+        let mut total = cached_count;
+        let mut batch_start = 0;
+
+        while batch_start < to_embed.len() {
+            let mut batch_end = batch_start;
+            let mut batch_tokens = 0usize;
+            while batch_end < to_embed.len() {
+                let text_tokens = (to_embed[batch_end].2.len() + 3) / 4;
+                if batch_tokens + text_tokens > batch_max_tokens && batch_end > batch_start {
+                    break;
+                }
+                batch_tokens += text_tokens;
+                batch_end += 1;
+            }
+
+            let texts: Vec<String> = to_embed[batch_start..batch_end]
+                .iter()
+                .map(|(_, _, t, _)| t.clone())
+                .collect();
+
+            match provider.embed_batch(&texts).await {
+                Ok(embeddings) => {
+                    for (j, emb) in embeddings.iter().enumerate() {
+                        let idx = batch_start + j;
+                        let (_, _, _, ref hash) = to_embed[idx];
+                        let emb_json = serde_json::to_string(emb)?;
+
+                        // Write ONLY to shadow — live tables are untouched.
+                        self.db.lock().unwrap().execute(
+                            "INSERT INTO embedding_cache_shadow
+                             (provider, model, provider_key, hash, embedding, dims, updated_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                             ON CONFLICT(provider, model, provider_key, hash) DO UPDATE SET
+                               embedding=excluded.embedding, dims=excluded.dims, updated_at=excluded.updated_at",
+                            params![
+                                "openai-compat", provider.model(), &provider_key, hash,
+                                emb_json, emb.len() as i64, Utc::now().timestamp_millis(),
+                            ],
+                        )?;
+                        total += 1;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Shadow embedding batch failed: {} — partial shadow table", e);
+                    break;
+                }
+            }
+            batch_start = batch_end;
+        }
+
+        Ok(total)
+    }
+
+    /// Atomically swap the shadow table into the live embedding_cache and apply
+    /// new embeddings to `chunks.embedding`.
+    ///
+    /// Runs as a single `BEGIN EXCLUSIVE` SQLite transaction, so it is either
+    /// fully committed or fully rolled back on any failure (including a crash).
+    /// After a successful commit the shadow table no longer exists.
+    pub fn swap_shadow_to_main(&self) -> Result<usize> {
+        let db = self.db.lock().unwrap();
+
+        db.execute_batch("BEGIN EXCLUSIVE")?;
+
+        let result: Result<usize> = (|| {
+            // Apply new embeddings from shadow to every chunk.
+            // Chunks with no shadow entry keep '[]' (rare: embed_batch failed for them).
+            let updated = db.execute(
+                "UPDATE chunks SET embedding = COALESCE(
+                    (SELECT s.embedding FROM embedding_cache_shadow s
+                     WHERE s.hash = chunks.hash LIMIT 1),
+                 '[]')",
+                [],
+            )?;
+
+            // Replace live embedding_cache with shadow contents, then drop shadow.
+            db.execute_batch(&format!(
+                "DELETE FROM {cache};
+                 INSERT INTO {cache} SELECT * FROM embedding_cache_shadow;
+                 DROP TABLE embedding_cache_shadow;",
+                cache = EMBEDDING_CACHE_TABLE
+            ))?;
+
+            Ok(updated)
+        })();
+
+        match result {
+            Ok(n) => {
+                db.execute_batch("COMMIT")?;
+                log::info!("Shadow swap committed: {} chunks updated", n);
+
+                // Migrate embeddings to chunks_vec after swap (P2-4)
+                if self.vec_available {
+                    match migrate_existing_to_vec(&db) {
+                        Ok(migrated) => {
+                            if migrated > 0 {
+                                log::info!("Migrated {} chunks to chunks_vec after swap", migrated);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("chunks_vec migration after swap failed (non-fatal): {}", e);
+                        }
+                    }
+                }
+
+                Ok(n)
+            }
+            Err(e) => {
+                db.execute_batch("ROLLBACK").ok();
+                Err(e.context("Shadow-to-main swap failed; rolled back — old embeddings intact"))
+            }
+        }
     }
 
     /// Sync memory files into SQLite index.
@@ -743,6 +1309,18 @@ impl MemoryDb {
 
         let now = chrono::Utc::now().timestamp_millis();
 
+        // Get old chunk IDs for this file (before delete) — for vec cleanup (P2-4)
+        let old_chunk_ids: Vec<String> = if self.vec_available {
+            {
+                let db = self.db.lock().unwrap();
+                let mut stmt = db.prepare("SELECT id FROM chunks WHERE path = ? AND source = ?")?;
+                let ids: Vec<String> = stmt.query_map(params![entry.path, source], |r| r.get(0))?
+                    .filter_map(|r| r.ok()).collect();
+                // db dropped here
+                ids
+            }
+        } else { vec![] };
+
         // Delete old chunks for this file
         if self.fts_available {
             self.db.lock().unwrap().execute(
@@ -754,6 +1332,14 @@ impl MemoryDb {
             "DELETE FROM chunks WHERE path = ? AND source = ?",
             params![entry.path, source],
         )?;
+
+        // Delete old chunks from chunks_vec (P2-4)
+        if self.vec_available {
+            let db = self.db.lock().unwrap();
+            for id in &old_chunk_ids {
+                delete_chunk_vec(&db, id).ok();
+            }
+        }
 
         // Insert new chunks
         for chunk in &chunks {
@@ -806,6 +1392,20 @@ impl MemoryDb {
 
     /// Remove a file's index entries (matching OpenClaw's stale cleanup).
     fn remove_file_index(&self, path: &str, source: &str) -> Result<()> {
+        // Get chunk IDs before deleting (for vec cleanup, P2-4)
+        let chunk_ids: Vec<String> = if self.vec_available {
+            {
+                let db = self.db.lock().unwrap();
+                let mut stmt = db.prepare("SELECT id FROM chunks WHERE path = ? AND source = ?")?;
+                let ids: Vec<String> = stmt.query_map(params![path, source], |r| r.get(0))?
+                    .filter_map(|r| r.ok()).collect();
+                // db dropped here
+                ids
+            }
+        } else {
+            vec![]
+        };
+
         self.db.lock().unwrap().execute(
             "DELETE FROM files WHERE path = ? AND source = ?",
             params![path, source],
@@ -820,6 +1420,15 @@ impl MemoryDb {
                 params![path, source],
             ).ok();
         }
+
+        // Delete from chunks_vec (P2-4)
+        if self.vec_available {
+            let db = self.db.lock().unwrap();
+            for id in &chunk_ids {
+                delete_chunk_vec(&db, id).ok();
+            }
+        }
+
         Ok(())
     }
 
@@ -875,6 +1484,18 @@ impl MemoryDb {
                     "UPDATE chunks SET embedding = ? WHERE id = ?",
                     params![cached_emb, id],
                 )?;
+
+                // Sync to chunks_vec (P2-4)
+                if self.vec_available {
+                    let emb: Vec<f32> = serde_json::from_str(&cached_emb).unwrap_or_default();
+                    if !emb.is_empty() {
+                        let db = self.db.lock().unwrap();
+                        if let Err(e) = upsert_chunk_vec(&db, id, &emb) {
+                            log::warn!("chunks_vec upsert failed (non-fatal): {}", e);
+                        }
+                    }
+                }
+
                 cached_count += 1;
             } else {
                 to_embed.push((i, id.clone(), text.clone(), hash.clone()));
@@ -920,6 +1541,14 @@ impl MemoryDb {
                             params![emb_json, id],
                         )?;
 
+                        // Sync to chunks_vec (P2-4)
+                        if self.vec_available {
+                            let db = self.db.lock().unwrap();
+                            if let Err(e) = upsert_chunk_vec(&db, id, emb) {
+                                log::warn!("chunks_vec upsert failed (non-fatal): {}", e);
+                            }
+                        }
+
                         // Update embedding cache (matching OpenClaw's upsertEmbeddingCache)
                         self.db.lock().unwrap().execute(
                             &format!(
@@ -952,6 +1581,14 @@ impl MemoryDb {
             self.update_index_meta(provider.model(), provider.target_dims())?;
             // Update runtime state (note: requires &mut self, so we use a workaround)
             // For now, this is handled by the daemon recreating MemoryDb or via unsafe
+        }
+
+        // Prune embedding cache if it has grown beyond the default LRU threshold.
+        // Use a conservative default here; callers can pass a configurable value via
+        // prune_embedding_cache_if_needed() if needed.
+        const DEFAULT_CACHE_MAX: usize = 50_000;
+        if let Err(e) = self.prune_embedding_cache_if_needed(DEFAULT_CACHE_MAX) {
+            log::warn!("Embedding cache pruning failed (non-fatal): {}", e);
         }
 
         Ok(total_embedded)
@@ -1160,6 +1797,94 @@ impl MemoryDb {
         Ok(Vec::new())
     }
 
+    /// KNN vector search using sqlite-vec (O(log n) vs O(n) linear scan).
+    /// Only available when vec_available=true (P2-4).
+    fn search_vector_knn(
+        &self,
+        query_vec: &[f32],
+        limit: usize,
+        provider: &EmbeddingProvider,
+    ) -> Result<Vec<MemorySearchResult>> {
+        if query_vec.is_empty() || !self.vec_available {
+            return Ok(Vec::new());
+        }
+
+        let blob = vec_to_blob(query_vec);
+
+        // Phase 1: KNN from sqlite-vec → (chunk_id, distance)
+        let knn_results: Vec<(String, f64)> = {
+            let db = self.db.lock().unwrap();
+            let mut stmt = db.prepare(
+                "SELECT chunk_id, distance FROM chunks_vec WHERE embedding MATCH ?1 AND k = ?2"
+            )?;
+            let results: Vec<(String, f64)> = stmt.query_map(params![blob, limit as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })?.filter_map(|r| r.ok()).collect();
+            // db and stmt dropped here
+            results
+        };
+
+        if knn_results.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 2: Bulk fetch chunk data from chunks table
+        let ids: Vec<&str> = knn_results.iter().map(|(id, _)| id.as_str()).collect();
+
+        // Build score map: distance → cosine similarity (score = 1.0 - distance)
+        let score_map: HashMap<String, f32> = knn_results.iter()
+            .map(|(id, dist)| (id.clone(), (1.0 - *dist) as f32))
+            .collect();
+
+        // Fetch chunk details
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!(
+            "SELECT id, path, source, start_line, end_line, text FROM chunks WHERE id IN ({})",
+            placeholders
+        );
+
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare(&query)?;
+
+        let mut results: Vec<MemorySearchResult> = stmt
+            .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?, // id
+                    r.get::<_, String>(1)?, // path
+                    r.get::<_, String>(2)?, // source
+                    r.get::<_, i64>(3)?,    // start_line
+                    r.get::<_, i64>(4)?,    // end_line
+                    r.get::<_, String>(5)?, // text
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(id, path, source, start, end, text)| {
+                let score = *score_map.get(&id).unwrap_or(&0.0);
+                let snippet = if text.len() > SNIPPET_MAX_CHARS {
+                    text[..SNIPPET_MAX_CHARS].to_string()
+                } else {
+                    text
+                };
+                let citation = format!("{}#L{}-L{}", path, start, end);
+                MemorySearchResult {
+                    path,
+                    snippet,
+                    start_line: start as usize,
+                    end_line: end as usize,
+                    score,
+                    citation: Some(citation),
+                    source,
+                    provider: Some("openai-compat".to_string()),
+                    model: Some(provider.model().to_string()),
+                    fallback: false,
+                }
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(results)
+    }
+
     /// Vector search with a pre-computed query embedding.
     /// Called when an embedding provider is available.
     pub fn search_vector_with_embedding(
@@ -1170,6 +1895,11 @@ impl MemoryDb {
     ) -> Result<Vec<MemorySearchResult>> {
         if query_vec.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Use sqlite-vec KNN if available (P2-4)
+        if self.vec_available {
+            return self.search_vector_knn(query_vec, limit, provider);
         }
 
         let db = self.db.lock().unwrap();
@@ -1461,87 +2191,6 @@ impl MemoryDb {
         })
     }
 
-    // ── Compact (matching OpenClaw's compaction) ──────────────────────
-
-    pub fn compact(&self, keep_days: usize) -> Result<CompactionResult> {
-        let memory_dir = self.memory_dir();
-        if !memory_dir.exists() {
-            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0, summary: None, tokens_before: None, tokens_after: None });
-        }
-
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let cutoff = Utc::now()
-            .checked_sub_signed(chrono::Duration::days(keep_days as i64))
-            .unwrap_or_else(Utc::now)
-            .format("%Y-%m-%d")
-            .to_string();
-
-        let mut files_to_compact = Vec::new();
-        let mut total_freed = 0usize;
-
-        let mut dir_entries: Vec<_> = std::fs::read_dir(&memory_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-            .collect();
-        dir_entries.sort_by_key(|e| e.file_name());
-
-        for entry in &dir_entries {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let date_str = name.trim_end_matches(".md");
-            if date_str >= cutoff.as_str() || date_str == today {
-                continue;
-            }
-            let content = std::fs::read_to_string(entry.path())?;
-            total_freed += content.len();
-            files_to_compact.push((name, content));
-        }
-
-        if files_to_compact.is_empty() {
-            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0, summary: None, tokens_before: None, tokens_after: None });
-        }
-
-        let mut summary_lines = Vec::new();
-        summary_lines.push(format!(
-            "\n## Compacted Archive ({})\n",
-            Utc::now().format("%Y-%m-%d %H:%M UTC")
-        ));
-
-        for (name, content) in &files_to_compact {
-            let meaningful: Vec<&str> = content
-                .lines()
-                .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-                .collect();
-            if !meaningful.is_empty() {
-                summary_lines.push(format!("### {}", name));
-                for line in meaningful.iter().take(10) {
-                    summary_lines.push(format!("- {}", line.trim()));
-                }
-                summary_lines.push(String::new());
-            }
-        }
-
-        let memory_md = self.memory_md_path();
-        let existing = if memory_md.exists() {
-            std::fs::read_to_string(&memory_md)?
-        } else {
-            "# Memory\n".to_string()
-        };
-        std::fs::write(&memory_md, format!("{}\n{}", existing, summary_lines.join("\n")))?;
-
-        let count = files_to_compact.len();
-        for (name, _) in &files_to_compact {
-            let path = memory_dir.join(name);
-            if path.exists() {
-                std::fs::remove_file(&path)?;
-            }
-        }
-
-        // Re-sync index after compaction
-        log::info!("Compacted {} memory files, freed ~{} chars", count, total_freed);
-
-        Ok(CompactionResult { files_compacted: count, chars_freed: total_freed, summary: None, tokens_before: None, tokens_after: None })
-    }
-
     // ── Sync With Options (matching OpenClaw's syncMemoryFiles params) ──
 
     /// Sync with advanced options: force reindex, progress callback.
@@ -1640,154 +2289,6 @@ impl MemoryDb {
         }
 
         Ok(indexed)
-    }
-
-    // ── Compaction Metadata (matching OpenClaw's session tracking) ─────
-
-    /// Read compaction metadata from SQLite meta table.
-    pub fn compaction_meta(&self) -> Result<CompactionMeta> {
-        let db = self.db.lock().unwrap();
-        let json: Option<String> = db
-            .prepare("SELECT value FROM meta WHERE key = 'compaction_meta'")
-            .ok()
-            .and_then(|mut s| s.query_row([], |r| r.get(0)).ok());
-        match json {
-            Some(j) => Ok(serde_json::from_str(&j).unwrap_or_default()),
-            None => Ok(CompactionMeta::default()),
-        }
-    }
-
-    /// Update compaction metadata.
-    pub fn update_compaction_meta(&self, meta: &CompactionMeta) -> Result<()> {
-        let json = serde_json::to_string(meta)?;
-        self.db.lock().unwrap().execute(
-            "INSERT INTO meta (key, value) VALUES ('compaction_meta', ?1)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![json],
-        )?;
-        Ok(())
-    }
-
-    // ── LLM-Driven Compaction (matching OpenClaw's compact) ───────────
-
-    /// LLM-driven compaction: summarize old memory files using the LLM.
-    /// This is the ONLY compaction method - no rule-based fallback.
-    /// If LLM fails, returns error without making destructive changes.
-    pub async fn compact_llm(
-        &self,
-        llm: &dyn crate::llm::LlmClient,
-        keep_days: usize,
-    ) -> Result<CompactionResult> {
-        let memory_dir = self.memory_dir();
-        if !memory_dir.exists() {
-            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0, summary: None, tokens_before: None, tokens_after: None });
-        }
-
-        let tokens_before = self.total_memory_tokens()?;
-
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let cutoff = Utc::now()
-            .checked_sub_signed(chrono::Duration::days(keep_days as i64))
-            .unwrap_or_else(Utc::now)
-            .format("%Y-%m-%d")
-            .to_string();
-
-        let mut files_to_compact = Vec::new();
-        let mut total_freed = 0usize;
-
-        let mut dir_entries: Vec<_> = std::fs::read_dir(&memory_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-            .collect();
-        dir_entries.sort_by_key(|e| e.file_name());
-
-        for entry in &dir_entries {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let date_str = name.trim_end_matches(".md");
-            if date_str >= cutoff.as_str() || date_str == today {
-                continue;
-            }
-            let content = std::fs::read_to_string(entry.path())?;
-            total_freed += content.len();
-            files_to_compact.push((name, content));
-        }
-
-        if files_to_compact.is_empty() {
-            return Ok(CompactionResult { files_compacted: 0, chars_freed: 0, summary: None, tokens_before: Some(tokens_before), tokens_after: Some(tokens_before) });
-        }
-
-        // Combine old content for LLM summarization
-        let combined: String = files_to_compact
-            .iter()
-            .map(|(name, content)| format!("### {}\n{}", name, content))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        // Ask LLM to summarize
-        let prompt = format!(
-            "Summarize the following conversation history into concise, durable facts. \
-             Focus on user preferences, decisions made, key findings, and important context. \
-             Format as a bulleted list. Be concise but preserve all important details.\n\n{}",
-            combined
-        );
-
-        let messages = vec![crate::llm::ChatMessage {
-            role: "user".to_string(),
-            content: prompt,
-            tool_call_id: None,
-            tool_calls: None,
-        }];
-
-        let summary = match llm.complete(&messages, &[]).await {
-            Ok(resp) => resp.content.unwrap_or_default(),
-            Err(e) => {
-                // LLM-only compaction: fail explicitly without destructive fallback
-                return Err(anyhow::anyhow!(
-                    "LLM compaction failed (no rule-based fallback): {}", e
-                ).context(e));
-            }
-        };
-
-        // Write LLM summary to MEMORY.md
-        let memory_md = self.memory_md_path();
-        let existing = if memory_md.exists() {
-            std::fs::read_to_string(&memory_md)?
-        } else {
-            "# Memory\n".to_string()
-        };
-        let compacted_section = format!(
-            "\n## Compacted Summary ({})\n\n{}\n",
-            Utc::now().format("%Y-%m-%d %H:%M UTC"),
-            summary
-        );
-        std::fs::write(&memory_md, format!("{}\n{}", existing, compacted_section))?;
-
-        // Delete old files
-        let count = files_to_compact.len();
-        for (name, _) in &files_to_compact {
-            let path = memory_dir.join(name);
-            if path.exists() {
-                std::fs::remove_file(&path)?;
-            }
-        }
-
-        // Update compaction metadata
-        let mut meta = self.compaction_meta()?;
-        meta.compaction_count += 1;
-        meta.last_compact_at = Some(Utc::now().to_rfc3339());
-        self.update_compaction_meta(&meta)?;
-
-        let tokens_after = self.total_memory_tokens()?;
-
-        log::info!("LLM-compacted {} memory files, freed ~{} chars, tokens {}->{}", count, total_freed, tokens_before, tokens_after);
-
-        Ok(CompactionResult {
-            files_compacted: count,
-            chars_freed: total_freed,
-            summary: Some(summary),
-            tokens_before: Some(tokens_before),
-            tokens_after: Some(tokens_after),
-        })
     }
 
     // ── Audit Log ───────────────────────────────────────────────────────
@@ -2002,18 +2503,6 @@ mod tests {
         let (_tmp, db) = temp_workspace();
         let content = db.read_file("MEMORY.md", Some(1), Some(1)).unwrap();
         assert!(content.contains("Memory"));
-    }
-
-    #[test]
-    fn test_compact() {
-        let (_tmp, db) = temp_workspace();
-        let old_file = db.memory_dir().join("2020-01-01.md");
-        std::fs::write(&old_file, "# Memory — 2020-01-01\n\n## user — 10:00:00 UTC\n\nOld memory\n").unwrap();
-        let result = db.compact(0).unwrap();
-        assert_eq!(result.files_compacted, 1);
-        assert!(!old_file.exists());
-        let memory_content = std::fs::read_to_string(db.memory_md_path()).unwrap();
-        assert!(memory_content.contains("Compacted Archive"));
     }
 
     #[test]

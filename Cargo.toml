@@ -25,6 +25,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 rusqlite = { version = "0.31", features = ["bundled-full"] }
+sqlite-vec = "0.1"
 ring = "0.17"
 base64 = "0.22"
 regex = "1"
@@ -33,3 +34,5 @@ hostname = "0.4"
 sha2 = "0.10"
 tokio-stream = "0.1"
 futures-core = "0.3"
+notify = "6"
+notify-debouncer-full = "0.3"

@@ -69,6 +69,9 @@ pub struct FileConfig {
 
     /// Allow lexical fallback when embeddings unavailable (default: false)
     pub memory_allow_lexical_fallback: Option<bool>,
+
+    /// Maximum entries in embedding cache before LRU pruning (default: 50_000)
+    pub memory_cache_max_entries: Option<usize>,
 }
 
 impl Default for FileConfig {
@@ -94,6 +97,7 @@ impl Default for FileConfig {
             memory_sync_on_search: None,
             memory_require_embeddings: None,
             memory_allow_lexical_fallback: None,
+            memory_cache_max_entries: None,
         }
     }
 }
@@ -170,6 +174,9 @@ pub struct Config {
 
     /// Allow lexical fallback when embeddings unavailable (default: false)
     pub memory_allow_lexical_fallback: bool,
+
+    /// Maximum number of entries in the embedding cache before LRU pruning (default: 50_000)
+    pub memory_cache_max_entries: usize,
 }
 
 impl Default for Config {
@@ -197,6 +204,7 @@ impl Default for Config {
             memory_sync_on_search: true,
             memory_require_embeddings: true,
             memory_allow_lexical_fallback: false,
+            memory_cache_max_entries: 50_000,
         }
     }
 }
@@ -529,6 +537,9 @@ impl Config {
                     }
                     if file_cfg.memory_allow_lexical_fallback.is_some() {
                         merged.memory_allow_lexical_fallback = file_cfg.memory_allow_lexical_fallback;
+                    }
+                    if file_cfg.memory_cache_max_entries.is_some() {
+                        merged.memory_cache_max_entries = file_cfg.memory_cache_max_entries;
                     }
                 }
                 Err(e) => {
@@ -927,6 +938,12 @@ impl Config {
             config.memory_allow_lexical_fallback = fallback.to_lowercase() != "false";
         }
 
+        if let Ok(max) = std::env::var("ZAPCLAW_MEMORY_CACHE_MAX_ENTRIES") {
+            if let Ok(n) = max.parse::<usize>() {
+                config.memory_cache_max_entries = n;
+            }
+        }
+
         config
     }
 
@@ -1004,6 +1021,9 @@ impl Config {
         }
         if let Some(fallback) = file_cfg.memory_allow_lexical_fallback {
             config.memory_allow_lexical_fallback = fallback;
+        }
+        if let Some(max_entries) = file_cfg.memory_cache_max_entries {
+            config.memory_cache_max_entries = max_entries;
         }
 
         // Apply env config (overrides file and defaults)
@@ -1107,6 +1127,13 @@ impl Config {
                 config.memory_allow_lexical_fallback = fallback.to_lowercase() != "false";
             }
         }
+        if std::env::var("ZAPCLAW_MEMORY_CACHE_MAX_ENTRIES").is_ok() {
+            if let Ok(max) = std::env::var("ZAPCLAW_MEMORY_CACHE_MAX_ENTRIES") {
+                if let Ok(n) = max.parse::<usize>() {
+                    config.memory_cache_max_entries = n;
+                }
+            }
+        }
 
         config
     }
@@ -1152,6 +1179,7 @@ impl Config {
             "memory_sync_on_search": true,
             "memory_require_embeddings": true,
             "memory_allow_lexical_fallback": false,
+            "memory_cache_max_entries": 50000,
             "_comment_memory": "Memory system settings for hybrid search (BM25 + vector embeddings)",
             "_comment_memory_setup": "Install Ollama and run: ollama pull nomic-embed-text:v1.5",
         });
@@ -1182,6 +1210,7 @@ impl Config {
             memory_sync_on_search: Some(self.memory_sync_on_search),
             memory_require_embeddings: Some(self.memory_require_embeddings),
             memory_allow_lexical_fallback: Some(self.memory_allow_lexical_fallback),
+            memory_cache_max_entries: Some(self.memory_cache_max_entries),
         };
 
         serde_json::to_string_pretty(&file_config)

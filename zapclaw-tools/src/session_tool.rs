@@ -4,7 +4,6 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use zapclaw_core::agent::Tool;
-use zapclaw_core::llm::LlmClient;
 use zapclaw_core::memory::MemoryDb;
 
 /// Session info/status tool — show session information, usage, model info.
@@ -12,10 +11,8 @@ use zapclaw_core::memory::MemoryDb;
 /// Actions:
 ///   - status: Show current session stats (model, tokens, time)
 ///   - history: Retrieve conversation history
-///   - compact: Trigger LLM-based compaction
 pub struct SessionTool {
     memory: Arc<MemoryDb>,
-    llm: Option<Arc<dyn LlmClient>>,
     model_name: String,
     model_aliases: Vec<(String, String)>,
     session_start: chrono::DateTime<chrono::Utc>,
@@ -28,25 +25,16 @@ struct SessionArgs {
     session_id: Option<String>,
     /// Number of history entries to return (for "history")
     limit: Option<usize>,
-    /// Days to keep (for "compact", default: 7)
-    keep_days: Option<usize>,
 }
 
 impl SessionTool {
     pub fn new(memory: Arc<MemoryDb>, model_name: &str, model_aliases: Vec<(String, String)>) -> Self {
         Self {
             memory,
-            llm: None,
             model_name: model_name.to_string(),
             model_aliases,
             session_start: chrono::Utc::now(),
         }
-    }
-
-    /// Set LLM client for compaction
-    pub fn with_llm(mut self, llm: Arc<dyn LlmClient>) -> Self {
-        self.llm = Some(llm);
-        self
     }
 }
 
@@ -55,7 +43,7 @@ impl Tool for SessionTool {
     fn name(&self) -> &str { "session_status" }
 
     fn description(&self) -> &str {
-        "Show session status (model, usage, time), retrieve history, or trigger compaction."
+        "Show session status (model, usage, time) or retrieve conversation history."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -64,8 +52,8 @@ impl Tool for SessionTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["status", "history", "compact"],
-                    "description": "Action: status (show stats), history (get history), compact (trigger compaction)"
+                    "enum": ["status", "history"],
+                    "description": "Action: status (show stats), history (get history)"
                 },
                 "session_id": {
                     "type": "string",
@@ -74,10 +62,6 @@ impl Tool for SessionTool {
                 "limit": {
                     "type": "integer",
                     "description": "Number of history entries to return (default: 20)"
-                },
-                "keep_days": {
-                    "type": "integer",
-                    "description": "Days of memory to keep during compaction (default: 7)"
                 }
             },
             "required": ["action"]
@@ -146,28 +130,7 @@ impl Tool for SessionTool {
                 Ok(lines.join("\n\n"))
             }
 
-            "compact" => {
-                let keep_days = args.keep_days.unwrap_or(7);
-
-                // LLM-only compaction (no rule-based fallback)
-                let llm = self.llm.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("LLM client not available for compaction"))?;
-
-                let result = self.memory.compact_llm(&**llm, keep_days).await?;
-
-                if result.files_compacted == 0 {
-                    Ok("Nothing to compact — memory is already lean.".to_string())
-                } else {
-                    Ok(format!(
-                        "✅ LLM-compacted {} files, freed ~{} chars (~{} tokens)",
-                        result.files_compacted,
-                        result.chars_freed,
-                        result.chars_freed / 4
-                    ))
-                }
-            }
-
-            _ => anyhow::bail!("Unknown action: {}. Use: status, history, compact", args.action),
+            _ => anyhow::bail!("Unknown action: {}. Use: status, history", args.action),
         }
     }
 }

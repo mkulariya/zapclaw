@@ -332,13 +332,74 @@ fn resolve_confirmation_mode(
     ConfirmationMode::Ask
 }
 
+/// Detect image file paths in a user message and load them as base64 data URIs.
+///
+/// Scans `input` for words ending in image extensions, resolves them relative
+/// to `workspace`, reads the file, and returns `"data:<mime>;base64,<data>"` strings.
+/// Silently skips files that don't exist or can't be read.
+fn detect_and_encode_images(input: &str, workspace: &std::path::Path) -> Vec<String> {
+    let image_exts: &[(&str, &str)] = &[
+        (".png",  "image/png"),
+        (".jpg",  "image/jpeg"),
+        (".jpeg", "image/jpeg"),
+        (".gif",  "image/gif"),
+        (".webp", "image/webp"),
+    ];
+
+    let mut data_uris = Vec::new();
+
+    for word in input.split_whitespace() {
+        let lower = word.to_lowercase();
+        let Some(mime) = image_exts.iter().find_map(|(ext, mime)| {
+            if lower.ends_with(ext) { Some(*mime) } else { None }
+        }) else {
+            continue;
+        };
+
+        let path = if std::path::Path::new(word).is_absolute() {
+            std::path::PathBuf::from(word)
+        } else {
+            workspace.join(word)
+        };
+
+        if let Ok(data) = std::fs::read(&path) {
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+            data_uris.push(format!("data:{};base64,{}", mime, encoded));
+            log::info!("Attached image: {} ({} bytes)", path.display(), data.len());
+        }
+    }
+
+    data_uris
+}
+
 /// Run agent with streaming output.
 ///
 /// Creates a channel, spawns a task to print stream chunks in real-time,
 /// and returns the final response when complete.
-async fn run_with_streaming(agent: &Agent, session_id: &str, task: &str) -> Result<String> {
+///
+/// Ctrl+C pressed during the run sets the agent's cancel flag, which
+/// causes the run to stop cleanly at the next safe checkpoint. The cancel
+/// flag is reset after the run so future runs are not affected.
+async fn run_with_streaming(
+    agent: &Agent,
+    session_id: &str,
+    task: &str,
+    images: Option<Vec<String>>,
+) -> Result<String> {
     // Create channel for streaming chunks
     let (tx, mut rx) = mpsc::channel::<StreamChunk>(100);
+
+    // Wire Ctrl+C to the agent's cancellation flag for mid-run interruption.
+    let cancel = agent.cancel_token();
+    cancel.store(false, std::sync::atomic::Ordering::Relaxed); // ensure clean state
+    let cancel_for_handler = Arc::clone(&cancel);
+    let ctrlc_handle = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel_for_handler.store(true, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("\n⛔ Cancelling run...");
+        }
+    });
 
     // Spawn task to handle streaming output
     let print_handle = tokio::spawn(async move {
@@ -369,8 +430,11 @@ async fn run_with_streaming(agent: &Agent, session_id: &str, task: &str) -> Resu
                 StreamChunk::ReasoningDelta(_) => {
                     // Internal reasoning — not displayed
                 }
+                StreamChunk::LifecycleEvent { phase } if phase == "cancelled" => {
+                    println!("\n[Run cancelled]");
+                }
                 StreamChunk::LifecycleEvent { .. } => {
-                    // Lifecycle events — optional status display (silent for now)
+                    // Other lifecycle events — silent for now
                 }
                 StreamChunk::Done(_) => {
                     // Final response received, stop streaming
@@ -381,12 +445,16 @@ async fn run_with_streaming(agent: &Agent, session_id: &str, task: &str) -> Resu
     });
 
     // Run agent with streaming
-    let response = agent.run_stream(session_id, task, tx).await?;
+    let response = agent.run_stream(session_id, task, images, tx).await;
+
+    // Stop the Ctrl+C handler and reset cancel flag so future runs start clean.
+    ctrlc_handle.abort();
+    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
     // Wait for print task to finish
     print_handle.await.ok();
 
-    Ok(response)
+    response
 }
 
 /// Model alias resolution.
@@ -729,7 +797,7 @@ async fn main() -> Result<()> {
         api_key,
     )));
 
-    // Session status (with LLM for compaction)
+    // Session status tool
     tools.register(Arc::new(
         SessionTool::new(
             memory.clone(),
@@ -741,7 +809,6 @@ async fn main() -> Result<()> {
                 ("llama".to_string(), "llama3.1:8b".to_string()),
             ],
         )
-        .with_llm(llm.clone())
     ));
 
     // Utility tools
@@ -803,7 +870,11 @@ async fn main() -> Result<()> {
 
     // Single task mode — no cron loop needed
     if let Some(task) = cli.task {
-        let response = run_with_streaming(&agent, &session_id, &task).await?;
+        let images = {
+            let uris = detect_and_encode_images(&task, &workspace);
+            if uris.is_empty() { None } else { Some(uris) }
+        };
+        let response = run_with_streaming(&agent, &session_id, &task, images).await?;
         println!("\n{}", extract_final_response(&response));
 
         // Shutdown memory daemon if running
@@ -896,34 +967,21 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // /compact command — LLM-driven compaction with fallback
-                if input == "/compact" || input.starts_with("/compact ") {
-                    let keep_days: usize = input
-                        .strip_prefix("/compact ")
-                        .and_then(|s| s.trim().parse().ok())
-                        .unwrap_or(7);
-
-                    // Try LLM-driven compaction first, fall back to rule-based
-                    let result = memory.compact_llm(agent.llm(), keep_days).await;
-                    match result {
+                // /compact — compact the current session's conversation history
+                if input == "/compact" {
+                    match agent.compact_session(&session_id).await {
                         Ok(result) => {
                             if result.files_compacted == 0 {
-                                println!("Nothing to compact — memory is lean.");
+                                println!("Nothing to compact — conversation history is short.");
                             } else {
-                                let summary_note = if result.summary.is_some() {
-                                    " (LLM-summarized)"
-                                } else {
-                                    " (rule-based)"
-                                };
                                 println!(
-                                    "Compacted {} files, freed ~{} chars (~{} tokens){}",
+                                    "Compacted {} messages, freed ~{} chars (~{} tokens)",
                                     result.files_compacted,
                                     result.chars_freed,
                                     result.chars_freed / 4,
-                                    summary_note,
                                 );
                                 if let (Some(before), Some(after)) = (result.tokens_before, result.tokens_after) {
-                                    println!("  Tokens: {} -> {}", before, after);
+                                    println!("  Context: ~{} tokens → ~{} tokens", before, after);
                                 }
                             }
                         }
@@ -995,8 +1053,14 @@ async fn main() -> Result<()> {
 
                 rl.add_history_entry(input).ok();
 
+                // Detect images referenced in user input and encode as data URIs
+                let images = {
+                    let uris = detect_and_encode_images(input, &workspace);
+                    if uris.is_empty() { None } else { Some(uris) }
+                };
+
                 // Run the task with streaming
-                match run_with_streaming(&agent, &session_id, input).await {
+                match run_with_streaming(&agent, &session_id, input, images).await {
                     Ok(response) => {
                         println!("\n{}\n", extract_final_response(&response));
                     }
@@ -1398,7 +1462,7 @@ fn print_help() {
     exit/quit/q  — Exit ZapClaw
     help         — Show this help
     tools        — List available tools
-    /compact [N] — Compact memory (keep N days, default: 7)
+    /compact     — Compact conversation history (LLM summarisation)
     /resume      — List recent sessions
     /resume <id> — Resume a previous session
     /update      — Self-update from git

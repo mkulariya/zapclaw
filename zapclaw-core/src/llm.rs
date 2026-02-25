@@ -14,6 +14,45 @@ pub struct ChatMessage {
     /// Tool calls requested by the assistant
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Attached images as base64 data URIs (e.g. "data:image/png;base64,...").
+    /// Not stored in JSONL session transcripts — transient per-message only.
+    #[serde(skip)]
+    pub images: Option<Vec<String>>,
+}
+
+/// Build a JSON value for a single message, expanding `images` into a
+/// multimodal content array when present.
+///
+/// Without images: `{"role": "user", "content": "hello"}`
+/// With images:    `{"role": "user", "content": [{"type":"text","text":"hello"}, {"type":"image_url",...}]}`
+fn build_message_value(msg: &ChatMessage) -> serde_json::Value {
+    let content: serde_json::Value = match &msg.images {
+        Some(images) if !images.is_empty() => {
+            let mut blocks = vec![serde_json::json!({"type": "text", "text": msg.content})];
+            for img in images {
+                blocks.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": img}
+                }));
+            }
+            serde_json::Value::Array(blocks)
+        }
+        _ => serde_json::Value::String(msg.content.clone()),
+    };
+
+    let mut obj = serde_json::json!({
+        "role": msg.role,
+        "content": content,
+    });
+
+    if let Some(ref id) = msg.tool_call_id {
+        obj["tool_call_id"] = serde_json::json!(id);
+    }
+    if let Some(ref calls) = msg.tool_calls {
+        obj["tool_calls"] = serde_json::to_value(calls).unwrap_or_default();
+    }
+
+    obj
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,7 +235,8 @@ impl OpenAiCompatibleClient {
 #[derive(Serialize)]
 struct ChatCompletionRequest {
     model: String,
-    messages: Vec<ChatMessage>,
+    /// Pre-serialized message objects (built via `build_message_value` to support multimodal content).
+    messages: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ToolDefinition>,
     temperature: f32,
@@ -248,7 +288,7 @@ impl LlmClient for OpenAiCompatibleClient {
 
         let request = ChatCompletionRequest {
             model: self.model.clone(),
-            messages: messages.to_vec(),
+            messages: messages.iter().map(build_message_value).collect(),
             tools: tools.to_vec(),
             temperature: 0.7,
         };
@@ -308,7 +348,7 @@ impl LlmClient for OpenAiCompatibleClient {
 
         let body = serde_json::json!({
             "model": self.model,
-            "messages": messages,
+            "messages": messages.iter().map(build_message_value).collect::<Vec<_>>(),
             "tools": if tools.is_empty() { serde_json::Value::Null } else { serde_json::to_value(tools)? },
             "temperature": 0.7,
             "stream": true,
@@ -491,6 +531,7 @@ mod tests {
             content: "Hello".to_string(),
             tool_call_id: None,
             tool_calls: None,
+            images: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("user"));

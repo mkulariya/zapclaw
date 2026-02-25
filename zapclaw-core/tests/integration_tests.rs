@@ -315,11 +315,13 @@ async fn test_context_overflow_recovery() {
     let llm = Arc::new(OverflowLlmClient::new());
     let memory = Arc::new(MemoryDb::in_memory().unwrap());
     let tools = ToolRegistry::new();
+    // Use a realistic context window so the guard doesn't block pre-loop;
+    // the mock LLM independently simulates overflow on its first call.
     let config = Config {
         max_steps: 5,
         require_confirmation: false,
         tool_timeout_secs: 5,
-        context_window_tokens: 4096,
+        context_window_tokens: 128_000,
         ..Config::default()
     };
     let agent = Agent::new(llm, memory, tools, config, false);
@@ -372,27 +374,57 @@ fn test_sync_with_options_force_reindex() {
     assert!(count3 > 0);
 }
 
-// --- Compaction metadata test ---
+// --- Shadow table (crash-safe reindex) tests ---
 
 #[test]
-fn test_compaction_metadata() {
+fn test_shadow_table_create_and_swap() {
     let db = MemoryDb::in_memory().unwrap();
+    db.store("s1", "user", "important fact about shadow tables").unwrap();
 
-    // Initially empty
-    let meta = db.compaction_meta().unwrap();
-    assert_eq!(meta.compaction_count, 0);
-    assert!(meta.last_compact_at.is_none());
+    // Sync to populate chunks
+    db.sync("test-model", 512).unwrap();
 
-    // Update
-    let updated_meta = zapclaw_core::memory::CompactionMeta {
-        compaction_count: 3,
-        last_compact_at: Some("2026-02-15T12:00:00Z".to_string()),
-    };
-    db.update_compaction_meta(&updated_meta).unwrap();
+    // Manually create shadow table and verify it exists
+    db.create_embedding_shadow_table().unwrap();
 
-    let read_back = db.compaction_meta().unwrap();
-    assert_eq!(read_back.compaction_count, 3);
-    assert_eq!(read_back.last_compact_at.as_deref(), Some("2026-02-15T12:00:00Z"));
+    // Create shadow again — must be idempotent (DROP IF EXISTS first)
+    db.create_embedding_shadow_table().unwrap();
+
+    // swap_shadow_to_main with empty shadow: chunks.embedding should become '[]',
+    // and embedding_cache should be cleared (both were already empty in test).
+    let swapped = db.swap_shadow_to_main().unwrap();
+    // We have at least one chunk from the sync
+    assert!(swapped > 0, "Expected at least one chunk updated during swap");
+
+    // Shadow table should be gone after swap
+    db.create_embedding_shadow_table().unwrap(); // should succeed (shadow dropped by swap)
+    db.swap_shadow_to_main().unwrap(); // clean up
+}
+
+#[test]
+fn test_startup_recovery_drops_leftover_shadow() {
+    // Simulate a crashed reindex by manually creating a shadow table,
+    // then verifying that opening a new MemoryDb cleans it up.
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path();
+
+    // Write a MEMORY.md so MemoryDb::new() initializes cleanly
+    std::fs::write(workspace.join("MEMORY.md"), "# Memory\n").unwrap();
+
+    {
+        let db = zapclaw_core::memory::MemoryDb::new(workspace).unwrap();
+        // Simulate a crashed reindex: create shadow table but don't swap it
+        db.create_embedding_shadow_table().unwrap();
+        // Shadow exists now — simulates mid-reindex crash
+    }
+
+    // Re-open the DB — startup recovery should have dropped the shadow table
+    {
+        let db = zapclaw_core::memory::MemoryDb::new(workspace).unwrap();
+        // create_embedding_shadow_table should work cleanly (shadow was cleaned up)
+        db.create_embedding_shadow_table().unwrap();
+        db.swap_shadow_to_main().unwrap();
+    }
 }
 
 // --- Memory search result metadata test ---

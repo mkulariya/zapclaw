@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -92,6 +93,15 @@ pub struct MemoryDaemon {
     memory: Arc<MemoryDb>,
     command_tx: mpsc::Sender<DaemonCommand>,
     _handle: JoinHandle<()>,
+    /// Set to `true` while a forced reindex is in progress.
+    ///
+    /// During reindex there is a window where embeddings are cleared but
+    /// not yet re-generated. `can_use_embeddings()` returns `false` while
+    /// this flag is set so callers fall back to lexical search consistently.
+    reindexing: Arc<AtomicBool>,
+    /// Notification for sync coalescing — multiple rapid file changes
+    /// trigger at most one extra sync (not N).
+    sync_notify: Arc<tokio::sync::Notify>,
 }
 
 impl MemoryDaemon {
@@ -125,12 +135,15 @@ impl MemoryDaemon {
             // Return a dummy daemon that's not actually running
             let (command_tx, _command_rx) = mpsc::channel(1);
             let handle = tokio::spawn(async {});
+            let sync_notify = Arc::new(tokio::sync::Notify::new());
             return Ok(Self {
                 workspace: workspace_str,
                 config: daemon_config,
                 memory,
                 command_tx,
                 _handle: handle,
+                reindexing: Arc::new(AtomicBool::new(false)),
+                sync_notify,
             });
         }
 
@@ -150,6 +163,14 @@ impl MemoryDaemon {
         // Create command channel
         let (command_tx, mut command_rx) = mpsc::channel::<DaemonCommand>(16);
 
+        // Shared reindexing flag: true while a forced reindex is in progress,
+        // so callers can fall back to lexical search during the empty-embeddings window.
+        let reindexing = Arc::new(AtomicBool::new(false));
+
+        // Sync coalescing: Arc<Notify> for watcher-triggered syncs.
+        // Multiple notify_one() calls before notified().await = exactly 1 wakeup.
+        let sync_notify = Arc::new(tokio::sync::Notify::new());
+
         // Check if reindex is needed before initial sync
         let needs_reindex = {
             let provider = daemon_config.create_provider();
@@ -160,11 +181,12 @@ impl MemoryDaemon {
         // Initial sync/embed (with reindex if needed)
         let memory_clone = Arc::clone(&memory);
         let config_clone = daemon_config.clone();
+        let reindexing_init = Arc::clone(&reindexing);
         tokio::spawn(async move {
             if needs_reindex {
                 log::warn!("Config changed, forcing full reindex...");
                 let provider = config_clone.create_provider();
-                if let Err(e) = Self::execute_force_reindex(&memory_clone, &provider).await {
+                if let Err(e) = Self::execute_force_reindex(&memory_clone, &provider, &reindexing_init).await {
                     log::error!("Forced reindex failed: {}", e);
                 }
             } else {
@@ -176,6 +198,8 @@ impl MemoryDaemon {
         let memory_loop = memory.clone();
         let config_loop = daemon_config.clone();
         let interval_secs = daemon_config.sync_interval_secs;
+        let reindexing_loop = Arc::clone(&reindexing);
+        let sync_notify_loop = Arc::clone(&sync_notify);
         let handle = tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(Duration::from_secs(interval_secs as u64));
             interval_timer.tick().await; // skip first tick (we just did initial sync)
@@ -189,6 +213,13 @@ impl MemoryDaemon {
                             log::warn!("Periodic sync failed: {}", e);
                         }
                     }
+                    // Coalesced sync from filesystem watcher
+                    _ = sync_notify_loop.notified() => {
+                        let provider = config_loop.create_provider();
+                        if let Err(e) = Self::sync_and_embed(&memory_loop, &provider).await {
+                            log::warn!("Watcher-triggered sync failed: {}", e);
+                        }
+                    }
                     // Commands
                     Some(cmd) = command_rx.recv() => {
                         match cmd {
@@ -200,7 +231,7 @@ impl MemoryDaemon {
                             }
                             DaemonCommand::ForceReindex { respond_to } => {
                                 let provider = config_loop.create_provider();
-                                let result = Self::execute_force_reindex(&memory_loop, &provider).await;
+                                let result = Self::execute_force_reindex(&memory_loop, &provider, &reindexing_loop).await;
                                 let _ = respond_to.send(result);
                             }
                             DaemonCommand::Shutdown { respond_to } => {
@@ -214,13 +245,98 @@ impl MemoryDaemon {
             }
         });
 
+        // Spawn filesystem watcher for the memory directory.
+        // Triggers sync_notify when MEMORY.md or memory/*.md changes.
+        let watch_workspace = workspace.to_path_buf();
+        let sync_notify_watcher = Arc::clone(&sync_notify);
+        tokio::task::spawn_blocking(move || {
+            Self::run_fs_watcher(watch_workspace, sync_notify_watcher);
+        });
+
         Ok(Self {
             workspace: workspace_str,
             config: daemon_config,
             memory,
             command_tx,
             _handle: handle,
+            reindexing,
+            sync_notify,
         })
+    }
+
+    /// Run the filesystem watcher in a blocking thread.
+    ///
+    /// Watches MEMORY.md and the memory/ subdirectory. When .md files change,
+    /// triggers sync_notify (coalescing N rapid events into 1 sync).
+    fn run_fs_watcher(workspace: std::path::PathBuf, sync_notify: Arc<tokio::sync::Notify>) {
+        use notify::Watcher;
+        use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+        use std::time::Duration as StdDuration;
+
+        let mut debouncer = match new_debouncer(
+            StdDuration::from_millis(300),
+            None,
+            move |result: DebounceEventResult| {
+                match result {
+                    Ok(events) => {
+                        // React to .md changes (memory files) or .jsonl changes (session transcripts)
+                        let has_relevant_change = events.iter().any(|ev| {
+                            ev.paths.iter().any(|p| {
+                                p.extension().map(|e| e == "md" || e == "jsonl").unwrap_or(false)
+                            })
+                        });
+                        if has_relevant_change {
+                            sync_notify.notify_one();
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Filesystem watcher error: {:?}", e);
+                    }
+                }
+            },
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("Failed to create filesystem watcher: {} — watcher disabled", e);
+                return;
+            }
+        };
+
+        let memory_md = workspace.join("MEMORY.md");
+        let memory_dir = workspace.join("memory");
+        let sessions_dir = workspace.join(".sessions");
+
+        // Watch MEMORY.md (if it exists)
+        if memory_md.exists() {
+            if let Err(e) = debouncer.watcher().watch(&memory_md, notify::RecursiveMode::NonRecursive) {
+                log::warn!("Failed to watch MEMORY.md: {}", e);
+            }
+        }
+
+        // Watch memory/ dir (if it exists)
+        if memory_dir.exists() {
+            if let Err(e) = debouncer.watcher().watch(&memory_dir, notify::RecursiveMode::Recursive) {
+                log::warn!("Failed to watch memory/ dir: {}", e);
+            }
+        }
+
+        // Watch .sessions/ dir for session transcript updates (.jsonl files)
+        if sessions_dir.exists() {
+            if let Err(e) = debouncer.watcher().watch(&sessions_dir, notify::RecursiveMode::NonRecursive) {
+                log::warn!("Failed to watch .sessions/ dir: {}", e);
+            }
+        }
+
+        if !memory_md.exists() && !memory_dir.exists() {
+            log::debug!("No memory files to watch yet — filesystem watcher idle");
+        } else {
+            log::info!("Memory filesystem watcher active (debounce: 300ms)");
+        }
+
+        // Block the thread keeping the watcher alive.
+        loop {
+            std::thread::sleep(StdDuration::from_secs(60));
+        }
     }
 
     /// Verify Ollama is reachable (with retry).
@@ -286,13 +402,41 @@ impl MemoryDaemon {
 
         let start = std::time::Instant::now();
         let provider = config.create_provider();
-        match Self::sync_and_embed(&memory, &provider).await {
-            Ok(_) => {
+
+        // Sync regular memory files
+        let model = provider.model().to_string();
+        let target_dims = provider.target_dims();
+        let memory_clone = memory.clone();
+        let sync_result = tokio::task::spawn_blocking(move || {
+            memory_clone.sync(&model, target_dims)
+        }).await;
+
+        match sync_result {
+            Ok(Ok(count)) => log::debug!("Initial file sync: {} files updated", count),
+            Ok(Err(e)) => log::error!("Initial file sync failed: {}", e),
+            Err(e) => log::error!("Initial file sync task failed: {}", e),
+        }
+
+        // Sync session transcript files
+        let memory_clone = memory.clone();
+        let model = provider.model().to_string();
+        let target_dims = provider.target_dims();
+        match tokio::task::spawn_blocking(move || {
+            memory_clone.sync_sessions(&model, target_dims)
+        }).await {
+            Ok(Ok(count)) => log::debug!("Initial session sync: {} files updated", count),
+            Ok(Err(e)) => log::warn!("Initial session sync failed (non-fatal): {}", e),
+            Err(e) => log::warn!("Initial session sync task failed (non-fatal): {}", e),
+        }
+
+        // Embed chunks
+        match memory.embed_all_chunks(&provider).await {
+            Ok(embedded) => {
                 let elapsed = start.elapsed().as_secs_f64();
-                log::info!("Initial sync completed in {:.2}s", elapsed);
+                log::info!("Initial sync completed in {:.2}s ({} chunks embedded)", elapsed, embedded);
             }
             Err(e) => {
-                log::error!("Initial sync failed: {}", e);
+                log::error!("Initial embed failed: {}", e);
             }
         }
     }
@@ -312,6 +456,18 @@ impl MemoryDaemon {
 
         log::debug!("Synced {} files", sync_result);
 
+        // Also sync session transcript files
+        let memory_clone = memory.clone();
+        let model = provider.model().to_string();
+        let target_dims = provider.target_dims();
+        match tokio::task::spawn_blocking(move || {
+            memory_clone.sync_sessions(&model, target_dims)
+        }).await {
+            Ok(Ok(n)) => log::debug!("Session sync: {} files updated", n),
+            Ok(Err(e)) => log::warn!("Session sync failed (non-fatal): {}", e),
+            Err(e) => log::warn!("Session sync task failed (non-fatal): {}", e),
+        }
+
         // Embed chunks
         let embedded = memory.embed_all_chunks(provider).await?;
         log::debug!("Embedded {} chunks", embedded);
@@ -319,33 +475,83 @@ impl MemoryDaemon {
         Ok(())
     }
 
-    /// Force full reindex: clear embeddings, re-sync, re-embed.
-    async fn execute_force_reindex(memory: &Arc<MemoryDb>, provider: &crate::memory::EmbeddingProvider) -> Result<ReindexResult> {
-        log::info!("Starting forced reindex...");
+    /// Force full reindex using a crash-safe shadow-table approach.
+    ///
+    /// **Crash safety guarantee:** the live `embedding_cache` and `chunks.embedding`
+    /// are never touched until the final atomic SQLite transaction (the swap). If the
+    /// process crashes at any point before that commit, the old embeddings remain
+    /// fully intact and will be available on restart.
+    ///
+    /// Sequence:
+    ///  1. Sync files — re-chunks all files, sets `chunks.embedding = '[]'`.
+    ///     `embedding_cache` is NOT cleared.
+    ///  2. Create `embedding_cache_shadow` — fresh table, old data untouched.
+    ///  3. Embed all chunks into shadow — cache hits read from live `embedding_cache`
+    ///     (no API calls for unchanged chunks). Live tables still untouched.
+    ///  4. Atomic swap — single `BEGIN EXCLUSIVE` transaction:
+    ///     update `chunks.embedding` from shadow, replace `embedding_cache` with shadow,
+    ///     drop shadow. Either fully commits or fully rolls back.
+    ///  5. `reindexing` flag is true only during step 4 (milliseconds, not minutes).
+    ///
+    /// **Startup recovery:** `MemoryDb::new()` drops any leftover shadow table
+    /// (`DROP TABLE IF EXISTS embedding_cache_shadow`) before the daemon starts.
+    async fn execute_force_reindex(
+        memory: &Arc<MemoryDb>,
+        provider: &crate::memory::EmbeddingProvider,
+        reindexing: &Arc<AtomicBool>,
+    ) -> Result<ReindexResult> {
+        log::info!("Starting crash-safe forced reindex...");
         let start = std::time::Instant::now();
 
-        // Clear embeddings first
-        memory.clear_embeddings().context("Failed to clear embeddings")?;
-
-        // Run in spawn_blocking for DB operations
-        let memory_clone = memory.clone();
+        // Phase 1: Sync files.
+        // Regenerates the chunks table (all chunks.embedding reset to '[]').
+        // embedding_cache is NOT touched — old embeddings remain intact.
+        let memory_clone = Arc::clone(memory);
         let model = provider.model().to_string();
 
         let files_reindexed = tokio::task::spawn_blocking(move || {
-            // Re-sync with force_reindex=true to reindex ALL files, even unchanged ones
-            let files = memory_clone.sync_with_options(&model, true, None)
-                .context("Reindex sync failed")?;
-            Ok::<_, anyhow::Error>(files)
+            memory_clone.sync_with_options(&model, true, None)
+                .context("Reindex sync failed")
         })
         .await??;
 
-        // Re-embed all chunks
-        let chunks_embedded = memory.embed_all_chunks(provider).await?;
+        // Also re-sync session transcript files during force reindex
+        let memory_clone = Arc::clone(memory);
+        let model = provider.model().to_string();
+        let target_dims = provider.target_dims();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            memory_clone.sync_sessions(&model, target_dims)
+        }).await? {
+            log::warn!("Session sync during reindex failed (non-fatal): {}", e);
+        }
+
+        // Phase 2: Create shadow table and build all embeddings into it.
+        // Live embedding_cache and chunks.embedding are NOT modified here.
+        // If the process crashes here: shadow gets dropped at next startup,
+        // and embedding_cache still has the old valid embeddings.
+        memory.create_embedding_shadow_table()
+            .context("Failed to create embedding shadow table")?;
+
+        let chunks_embedded = memory.embed_all_chunks_to_shadow(provider).await
+            .context("Failed to embed chunks into shadow table")?;
+
+        // Phase 3: Atomic swap.
+        // The reindexing window shrinks to just the duration of this transaction
+        // (typically milliseconds), not the full embed duration (potentially minutes).
+        reindexing.store(true, Ordering::Relaxed);
+
+        let swap_result = {
+            let m = Arc::clone(memory);
+            tokio::task::spawn_blocking(move || m.swap_shadow_to_main()).await?
+        };
+
+        reindexing.store(false, Ordering::Relaxed);
+        swap_result.context("Shadow-to-main atomic swap failed")?;
 
         let duration = start.elapsed().as_secs_f64();
 
         log::info!(
-            "Reindex complete: {} files, {} chunks in {:.2}s",
+            "Crash-safe reindex complete: {} files, {} chunks in {:.2}s",
             files_reindexed,
             chunks_embedded,
             duration
@@ -443,8 +649,22 @@ impl MemoryDaemon {
 
     /// Check if embeddings are available or if Ollama is reachable for new embeddings.
     /// This checks both existing embedded chunks AND current Ollama reachability.
+    /// Returns true if a forced reindex is currently in progress.
+    ///
+    /// During reindex, embeddings are cleared and not yet regenerated — callers
+    /// should use lexical-only search until this returns false.
+    pub fn is_reindexing(&self) -> bool {
+        self.reindexing.load(Ordering::Relaxed)
+    }
+
     pub fn can_use_embeddings(&self) -> bool {
         if !self.config.enabled {
+            return false;
+        }
+
+        // If a reindex is in progress, embeddings are in an empty-window state.
+        if self.reindexing.load(Ordering::Relaxed) {
+            log::debug!("Reindex in progress — falling back to lexical search");
             return false;
         }
 

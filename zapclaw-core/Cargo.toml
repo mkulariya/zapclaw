@@ -16,17 +16,20 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 ring = { workspace = true }
-base64 = { workspace = true }
+base64 = "0.22"
 regex = { workspace = true }
 async-trait = { workspace = true }
 hostname = { workspace = true }
 rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }
 sha2 = { workspace = true }
 tokio-stream = { workspace = true }
 futures-core = { workspace = true }
 url = "2"
 dirs = "5"
 libc = "0.2"
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

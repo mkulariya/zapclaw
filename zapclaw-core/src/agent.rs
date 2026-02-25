@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -13,6 +14,13 @@ use crate::llm::{
 use crate::memory::MemoryDb;
 use crate::sanitizer::InputSanitizer;
 use crate::session::SessionStore;
+
+/// Proactive compaction when this many tokens remain before the context limit.
+const APPROACHING_LIMIT_REMAINING_TOKENS: usize = 24_000;
+
+/// Conversations with more estimated tokens than this threshold are summarised
+/// using staged multi-pass compaction instead of a single LLM call.
+const SINGLE_PASS_TOKEN_THRESHOLD: usize = 6_000;
 
 /// Interactive confirmation prompt for CLI.
 ///
@@ -315,6 +323,8 @@ pub struct Agent {
     sandbox_active: bool,
     confirmation_mode: ConfirmationMode,
     egress_guard: Option<EgressGuard>,
+    /// Shared cancellation flag — set to `true` to abort the current agent run.
+    cancel: Arc<AtomicBool>,
 }
 
 impl Agent {
@@ -350,7 +360,16 @@ impl Agent {
             sandbox_active,
             confirmation_mode: ConfirmationMode::Ask, // Default to safe interactive mode
             egress_guard,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Return the shared cancellation token.
+    ///
+    /// Set the inner bool to `true` (e.g. from a Ctrl+C handler) to request
+    /// that the current agent run stop cleanly at the next safe checkpoint.
+    pub fn cancel_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
     }
 
     /// Set the confirmation mode for tools requiring approval.
@@ -411,6 +430,7 @@ impl Agent {
             content: sanitized_task.clone(),
             tool_call_id: None,
             tool_calls: None,
+            images: None,
         };
 
         // Session persistence: write user message
@@ -424,6 +444,7 @@ impl Agent {
                 content: system_prompt,
                 tool_call_id: None,
                 tool_calls: None,
+                images: None,
             },
         ];
         messages.extend(previous_messages);
@@ -431,12 +452,45 @@ impl Agent {
 
         // 4. Agent loop: observe-plan-act-reflect
         let tool_defs = self.tools.definitions();
+
+        // Context window guard — block or warn before starting the loop
+        {
+            let guard = crate::truncation::evaluate_context_window_guard(
+                &messages,
+                self.config.context_window_tokens,
+            );
+            if guard.should_block {
+                anyhow::bail!(
+                    "Context window too full to start (~{} tokens used, only ~{} remaining). \
+                     Use /compact to summarise history or /reset to start fresh.",
+                    guard.estimated_tokens, guard.remaining_tokens
+                );
+            }
+            if guard.should_warn {
+                log::warn!(
+                    "Context window nearly full (~{} tokens, ~{} remaining). \
+                     Consider /compact to prevent mid-run overflow.",
+                    guard.estimated_tokens, guard.remaining_tokens
+                );
+            }
+        }
+
         let mut step = 0;
         let mut final_response = String::new();
         let mut recent_tool_outputs: VecDeque<String> = VecDeque::with_capacity(5);
 
         loop {
             step += 1;
+
+            // Cancellation check — Ctrl+C or external abort signal
+            if self.cancel.load(Ordering::Relaxed) {
+                log::info!("⛔ Agent run cancelled by user");
+                self.memory.log_action("run_cancelled", None, None).ok();
+                if final_response.is_empty() {
+                    final_response = "Run cancelled.".to_string();
+                }
+                break;
+            }
 
             // Max steps guard
             if step > self.config.max_steps {
@@ -454,13 +508,27 @@ impl Agent {
 
             log::info!("🔄 Step {}/{}", step, self.config.max_steps);
 
-            // History truncation: fit within 80% of context window
-            let budget = (self.config.context_window_tokens as f64 * 0.8) as usize;
-            let messages_for_llm = crate::truncation::truncate_history(&messages, budget, 3);
+            // Repair any orphaned tool uses/results before calling LLM
+            crate::truncation::repair_orphaned_tool_uses(&mut messages);
+            crate::truncation::repair_orphaned_tool_results(&mut messages);
+
+            // Proactive compaction when approaching context limit
+            {
+                let est_tokens = crate::truncation::estimate_messages_tokens(&messages);
+                let remaining = self.config.context_window_tokens.saturating_sub(est_tokens);
+                if remaining < APPROACHING_LIMIT_REMAINING_TOKENS {
+                    log::info!(
+                        "Context approaching limit (~{} tokens remaining), running proactive compaction",
+                        remaining
+                    );
+                    self.flush_session_to_memory(&messages).await;
+                    self.compact_conversation_history(&mut messages, session_id).await;
+                }
+            }
 
             // Call LLM with overflow recovery
             let response = match self.call_llm_with_overflow_recovery(
-                &mut messages, &messages_for_llm, &tool_defs,
+                &mut messages, &tool_defs, session_id,
             ).await {
                 Ok(resp) => resp,
                 Err(e) => return Err(e).context("LLM completion failed"),
@@ -483,6 +551,7 @@ impl Agent {
                         content: content.clone(),
                         tool_call_id: None,
                         tool_calls: None,
+                        images: None,
                     };
                     if let Some(ref store) = self.session_store {
                         store.append_message(session_id, &asst_msg).ok();
@@ -499,6 +568,7 @@ impl Agent {
                 content: response.content.clone().unwrap_or_default(),
                 tool_call_id: None,
                 tool_calls: Some(response.tool_calls.clone()),
+                images: None,
             };
             if let Some(ref store) = self.session_store {
                 store.append_message(session_id, &asst_tc_msg).ok();
@@ -532,6 +602,7 @@ impl Agent {
                     content: tool_result.clone(),
                     tool_call_id: Some(tool_call.id.clone()),
                     tool_calls: None,
+                    images: None,
                 };
                 if let Some(ref store) = self.session_store {
                     store.append_message(session_id, &tool_msg).ok();
@@ -556,10 +627,13 @@ impl Agent {
     /// Run a task through the agent loop with streaming output.
     ///
     /// Returns the final response text while emitting StreamChunks via the channel.
+    /// `images` is an optional list of base64 data URIs (e.g. "data:image/png;base64,...") to
+    /// attach to the initial user message for multimodal vision models.
     pub async fn run_stream(
         &self,
         session_id: &str,
         task: &str,
+        images: Option<Vec<String>>,
         tx: tokio::sync::mpsc::Sender<crate::llm::StreamChunk>,
     ) -> Result<String> {
         use crate::llm::StreamChunk;
@@ -601,9 +675,10 @@ impl Agent {
             content: sanitized_task.clone(),
             tool_call_id: None,
             tool_calls: None,
+            images,
         };
 
-        // Session persistence: write user message
+        // Session persistence: write user message (images not persisted — transient)
         if let Some(ref store) = self.session_store {
             store.append_message(session_id, &user_msg).ok();
         }
@@ -614,6 +689,7 @@ impl Agent {
                 content: system_prompt,
                 tool_call_id: None,
                 tool_calls: None,
+                images: None,
             },
         ];
         messages.extend(previous_messages);
@@ -621,12 +697,46 @@ impl Agent {
 
         // 4. Agent loop: observe-plan-act-reflect (streaming version)
         let tool_defs = self.tools.definitions();
+
+        // Context window guard — block or warn before starting the loop
+        {
+            let guard = crate::truncation::evaluate_context_window_guard(
+                &messages,
+                self.config.context_window_tokens,
+            );
+            if guard.should_block {
+                anyhow::bail!(
+                    "Context window too full to start (~{} tokens used, only ~{} remaining). \
+                     Use /compact to summarise history or /reset to start fresh.",
+                    guard.estimated_tokens, guard.remaining_tokens
+                );
+            }
+            if guard.should_warn {
+                log::warn!(
+                    "Context window nearly full (~{} tokens, ~{} remaining). \
+                     Consider /compact to prevent mid-run overflow.",
+                    guard.estimated_tokens, guard.remaining_tokens
+                );
+            }
+        }
+
         let mut step = 0;
         let mut final_response = String::new();
         let mut recent_tool_outputs: VecDeque<String> = VecDeque::with_capacity(5);
 
         loop {
             step += 1;
+
+            // Cancellation check — Ctrl+C or external abort signal
+            if self.cancel.load(Ordering::Relaxed) {
+                log::info!("⛔ Agent run cancelled by user");
+                self.memory.log_action("run_cancelled", None, None).ok();
+                let _ = tx.send(StreamChunk::LifecycleEvent { phase: "cancelled".to_string() }).await;
+                if final_response.is_empty() {
+                    final_response = "Run cancelled.".to_string();
+                }
+                break;
+            }
 
             // Max steps guard
             if step > self.config.max_steps {
@@ -646,13 +756,27 @@ impl Agent {
             let _ = tx.send(StreamChunk::LifecycleEvent { phase: "step".to_string() }).await;
             log::info!("🔄 Step {}/{}", step, self.config.max_steps);
 
-            // History truncation: fit within 80% of context window
-            let budget = (self.config.context_window_tokens as f64 * 0.8) as usize;
-            let messages_for_llm = crate::truncation::truncate_history(&messages, budget, 3);
+            // Repair any orphaned tool uses/results before calling LLM
+            crate::truncation::repair_orphaned_tool_uses(&mut messages);
+            crate::truncation::repair_orphaned_tool_results(&mut messages);
+
+            // Proactive compaction when approaching context limit
+            {
+                let est_tokens = crate::truncation::estimate_messages_tokens(&messages);
+                let remaining = self.config.context_window_tokens.saturating_sub(est_tokens);
+                if remaining < APPROACHING_LIMIT_REMAINING_TOKENS {
+                    log::info!(
+                        "Context approaching limit (~{} tokens remaining), running proactive compaction",
+                        remaining
+                    );
+                    self.flush_session_to_memory(&messages).await;
+                    self.compact_conversation_history(&mut messages, session_id).await;
+                }
+            }
 
             // Call LLM with streaming + overflow recovery
             let response = match self.call_llm_stream_with_overflow_recovery(
-                &mut messages, &messages_for_llm, &tool_defs, tx.clone(),
+                &mut messages, &tool_defs, tx.clone(), session_id,
             ).await {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -677,6 +801,7 @@ impl Agent {
                         content: content.clone(),
                         tool_call_id: None,
                         tool_calls: None,
+                        images: None,
                     };
                     if let Some(ref store) = self.session_store {
                         store.append_message(session_id, &asst_msg).ok();
@@ -693,6 +818,7 @@ impl Agent {
                 content: response.content.clone().unwrap_or_default(),
                 tool_call_id: None,
                 tool_calls: Some(response.tool_calls.clone()),
+                images: None,
             };
             if let Some(ref store) = self.session_store {
                 store.append_message(session_id, &asst_tc_msg).ok();
@@ -736,6 +862,7 @@ impl Agent {
                     content: tool_result,
                     tool_call_id: Some(tool_call.id.clone()),
                     tool_calls: None,
+                    images: None,
                 };
                 if let Some(ref store) = self.session_store {
                     store.append_message(session_id, &tool_msg).ok();
@@ -953,31 +1080,339 @@ impl Agent {
         .map_err(|_| anyhow::anyhow!("Tool '{}' timed out after {}s", tool_name, self.config.tool_timeout_secs))?
         .context(format!("Tool '{}' execution failed", tool_name))?;
 
-        // Truncate oversized tool results (matching OpenClaw's tool-result-truncation)
-        let max_chars = crate::truncation::calculate_max_tool_result_chars(
-            self.config.context_window_tokens,
+        // Hard-cap tool results at HARD_MAX_TOOL_RESULT_CHARS (matching OpenClaw's
+        // session-tool-result-guard). This is a fixed ceiling, NOT context-window-
+        // proportional — proportional limiting only applies during overflow recovery.
+        let result = crate::truncation::truncate_tool_result(
+            &result,
+            crate::truncation::HARD_MAX_TOOL_RESULT_CHARS,
         );
-        let result = crate::truncation::truncate_tool_result(&result, max_chars);
 
         Ok(result)
     }
 
+    /// Format messages into a human-readable text block for summarization.
+    fn format_messages_for_summary(messages: &[ChatMessage]) -> String {
+        messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, &m.content[..m.content.len().min(1_000)]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Summarize a slice of messages in a single LLM call.
+    async fn summarize_messages_single(&self, messages: &[ChatMessage]) -> Result<String> {
+        let text = Self::format_messages_for_summary(messages);
+        let prompt = format!(
+            "Summarize the following conversation concisely, preserving key facts, \
+             decisions, and context needed to continue. Be brief.\n\n{}",
+            text
+        );
+        let req = vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+            tool_call_id: None,
+            tool_calls: None,
+            images: None,
+        }];
+        let resp = self.llm.complete(&req, &[]).await?;
+        Ok(resp.content.unwrap_or_else(|| "[conversation summary unavailable]".to_string()))
+    }
+
+    /// Compute an adaptive chunk size targeting ~12.5% of the context window per chunk.
+    fn compute_adaptive_chunk_size(avg_msg_tokens: usize, context_window_tokens: usize) -> usize {
+        let target = context_window_tokens / 8;
+        (target / avg_msg_tokens.max(1)).clamp(4, 100)
+    }
+
+    /// Summarize a large slice of messages using multi-pass staged compaction.
+    ///
+    /// Splits the messages into adaptive-sized chunks, summarizes each chunk
+    /// individually, then merges the chunk summaries with a second LLM call.
+    async fn summarize_messages_staged(&self, messages: &[ChatMessage]) -> Result<String> {
+        let total = crate::truncation::estimate_messages_tokens(messages);
+        let avg   = total / messages.len().max(1);
+        let chunk = Self::compute_adaptive_chunk_size(avg, self.config.context_window_tokens);
+        let chunks: Vec<&[ChatMessage]> = messages.chunks(chunk).collect();
+
+        if chunks.len() == 1 {
+            return self.summarize_messages_single(chunks[0]).await;
+        }
+
+        let mut summaries = Vec::new();
+        for c in &chunks {
+            match self.summarize_messages_single(c).await {
+                Ok(s) => summaries.push(s),
+                Err(e) => {
+                    log::warn!("Chunk summarization failed ({}), using partial fallback", e);
+                    let partial = c
+                        .iter()
+                        .map(|m| format!("{}: {}", m.role, &m.content[..m.content.len().min(300)]))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    summaries.push(partial);
+                }
+            }
+        }
+
+        // Merge chunk summaries with a second-pass LLM call
+        let combined = summaries.join("\n\n---\n\n");
+        let merge_prompt = format!(
+            "These are summaries of different parts of a conversation. \
+             Combine them into a single coherent summary preserving all key facts.\n\n{}",
+            combined
+        );
+        let req = vec![ChatMessage {
+            role: "user".to_string(),
+            content: merge_prompt,
+            tool_call_id: None,
+            tool_calls: None,
+            images: None,
+        }];
+        match self.llm.complete(&req, &[]).await {
+            Ok(resp) => Ok(resp.content.unwrap_or(combined)),
+            Err(e) => {
+                log::warn!("Summary-of-summaries failed ({}), joining chunks verbatim", e);
+                Ok(summaries.join("\n\n"))
+            }
+        }
+    }
+
+    /// Compact conversation history via LLM summarization.
+    ///
+    /// Summarizes older messages and replaces them with a compact summary block,
+    /// keeping the last `COMPACT_KEEP_FRESH` messages intact. This is the correct
+    /// response to a context-window overflow — summarize conversation history,
+    /// not memory files.
+    ///
+    /// Returns `true` if compaction succeeded and `messages` was updated.
+    async fn compact_conversation_history(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        session_id: &str,
+    ) -> bool {
+        const COMPACT_KEEP_FRESH: usize = 6;
+
+        if messages.len() < 4 {
+            return false;
+        }
+
+        let system_msg = messages[0].clone();
+        let history: Vec<ChatMessage> = messages[1..].to_vec();
+
+        let keep_last = COMPACT_KEEP_FRESH.min(history.len());
+        let summarize_end = history.len().saturating_sub(keep_last);
+
+        if summarize_end == 0 {
+            return false;
+        }
+
+        let to_summarize = &history[..summarize_end];
+        let to_keep      = &history[history.len() - keep_last..];
+
+        let total_tokens = crate::truncation::estimate_messages_tokens(to_summarize);
+        let summary = if total_tokens <= SINGLE_PASS_TOKEN_THRESHOLD {
+            match self.summarize_messages_single(to_summarize).await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("Compaction (single-pass) failed: {}", e);
+                    return false;
+                }
+            }
+        } else {
+            match self.summarize_messages_staged(to_summarize).await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("Compaction (staged) failed: {}", e);
+                    return false;
+                }
+            }
+        };
+
+        let mut compacted = vec![
+            system_msg,
+            ChatMessage {
+                role: "user".to_string(),
+                content: format!("[Earlier conversation summary]\n{}", summary),
+                tool_call_id: None,
+                tool_calls: None,
+                images: None,
+            },
+        ];
+        compacted.extend_from_slice(to_keep);
+        *messages = compacted;
+
+        if let Some(ref store) = self.session_store {
+            store.increment_compaction_count(session_id).ok();
+        }
+
+        log::info!(
+            "Context compacted: {} messages summarised, {} kept fresh",
+            summarize_end, keep_last
+        );
+        true
+    }
+
+    /// Compact the stored session transcript for the given session ID.
+    ///
+    /// Loads the session messages, prepends the current system prompt (required by
+    /// `compact_conversation_history`), runs LLM-based compaction, then rewrites
+    /// the session JSONL with the compacted history (system prompt excluded).
+    ///
+    /// This is the public entry point for the `/compact` REPL command.
+    pub async fn compact_session(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::memory::CompactionResult> {
+        let store = match &self.session_store {
+            Some(s) => s,
+            None => anyhow::bail!("No session store configured"),
+        };
+
+        let mut messages = store.load_session_messages(session_id)?;
+        let msgs_before = messages.len();
+        let chars_before: usize = messages.iter().map(|m| m.content.len()).sum();
+
+        // compact_conversation_history expects messages[0] to be the system prompt.
+        let system_msg = ChatMessage {
+            role: "system".to_string(),
+            content: self.build_system_prompt(),
+            tool_call_id: None,
+            tool_calls: None,
+            images: None,
+        };
+        messages.insert(0, system_msg);
+
+        let compacted = self.compact_conversation_history(&mut messages, session_id).await;
+        if !compacted {
+            return Ok(crate::memory::CompactionResult {
+                files_compacted: 0,
+                chars_freed: 0,
+                summary: None,
+                tokens_before: None,
+                tokens_after: None,
+            });
+        }
+
+        // Strip the system prompt before saving — it is rebuilt at runtime each run.
+        let to_save: Vec<ChatMessage> = messages.into_iter().skip(1).collect();
+        let chars_after: usize = to_save.iter().map(|m| m.content.len()).sum();
+
+        // Extract the LLM summary text from the compacted messages.
+        let summary = to_save.iter()
+            .find(|m| m.role == "user" && m.content.starts_with("[Earlier conversation summary]"))
+            .map(|m| m.content
+                .strip_prefix("[Earlier conversation summary]\n")
+                .unwrap_or(&m.content)
+                .to_string());
+
+        store.rewrite_session_messages(session_id, &to_save)?;
+
+        Ok(crate::memory::CompactionResult {
+            files_compacted: msgs_before.saturating_sub(to_save.len()),
+            chars_freed: chars_before.saturating_sub(chars_after),
+            summary,
+            tokens_before: Some(chars_before / 4),
+            tokens_after: Some(chars_after / 4),
+        })
+    }
+
+    /// Flush key session insights to long-term memory before context compaction.
+    ///
+    /// When context overflows, key conversation insights are extracted by the LLM
+    /// and written to `memory/YYYY-MM-DD.md` before history is discarded. This
+    /// ensures important decisions and facts are preserved in the memory index.
+    /// Errors are silently ignored (best-effort — don't block compaction on flush failure).
+    async fn flush_session_to_memory(&self, messages: &[ChatMessage]) {
+        const FLUSH_LOOK_BACK: usize = 15;
+
+        let non_system: Vec<&ChatMessage> = messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .collect();
+
+        if non_system.is_empty() {
+            return;
+        }
+
+        let look_back = FLUSH_LOOK_BACK.min(non_system.len());
+        let recent = &non_system[non_system.len() - look_back..];
+
+        let conversation_text: String = recent
+            .iter()
+            .map(|m| format!("{}: {}", m.role, &m.content[..m.content.len().min(300)]))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let flush_request = vec![ChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Extract key decisions, facts, todos, and important context from this conversation for long-term memory. Be concise and use bullet points.\n\n{}",
+                conversation_text
+            ),
+            tool_call_id: None,
+            tool_calls: None,
+            images: None,
+        }];
+
+        match self.llm.complete(&flush_request, &[]).await {
+            Ok(resp) => {
+                let insights = match resp.content {
+                    Some(c) if !c.trim().is_empty() => c,
+                    _ => return,
+                };
+
+                let date = chrono::Utc::now().format("%Y-%m-%d");
+                let memory_dir = self.workspace_dir.join("memory");
+                let _ = std::fs::create_dir_all(&memory_dir);
+                let file_path = memory_dir.join(format!("{}.md", date));
+                let header = format!(
+                    "\n## Session Flush {}\n\n",
+                    chrono::Utc::now().to_rfc3339()
+                );
+
+                use std::io::Write;
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&file_path)
+                {
+                    let _ = file.write_all(header.as_bytes());
+                    let _ = file.write_all(insights.as_bytes());
+                    let _ = file.write_all(b"\n");
+                    log::info!("Session insights flushed to memory/{}.md", date);
+                }
+            }
+            Err(e) => {
+                log::warn!("Session memory flush failed (non-fatal): {}", e);
+            }
+        }
+    }
+
     /// Call LLM with context overflow recovery (non-streaming).
-    /// Retries up to 3 times on overflow: truncate tool results, compact, aggressive trim.
+    ///
+    /// Passes `messages` directly to the LLM. On overflow, retries up to 3 times
+    /// using an escalating recovery strategy applied in-place to `messages`:
+    ///   attempt 0 → flush insights + multi-stage LLM compaction
+    ///   attempt 1 → truncate oversized tool results + compact again
+    ///   attempt 2 → aggressive 40% trim (last resort)
     async fn call_llm_with_overflow_recovery(
         &self,
         messages: &mut Vec<ChatMessage>,
-        messages_for_llm: &[ChatMessage],
         tool_defs: &[crate::llm::ToolDefinition],
+        session_id: &str,
     ) -> Result<crate::llm::LlmResponse> {
         use crate::llm::is_context_overflow_error;
         use crate::truncation::{calculate_max_tool_result_chars, truncate_tool_result, truncate_history};
 
         const MAX_OVERFLOW_RETRIES: usize = 3;
-        let mut attempt_messages = messages_for_llm.to_vec();
 
         for attempt in 0..=MAX_OVERFLOW_RETRIES {
-            match self.llm.complete(&attempt_messages, tool_defs).await {
+            if self.cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("Agent run cancelled during overflow recovery");
+            }
+
+            match self.llm.complete(messages, tool_defs).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) if is_context_overflow_error(&e) && attempt < MAX_OVERFLOW_RETRIES => {
                     log::warn!(
@@ -985,28 +1420,26 @@ impl Agent {
                         attempt + 1, MAX_OVERFLOW_RETRIES
                     );
 
-                    // Strategy 1: Truncate oversized tool results in history
-                    let max_chars = calculate_max_tool_result_chars(
-                        self.config.context_window_tokens / 2, // tighter limit on retry
-                    );
-                    for msg in messages.iter_mut() {
-                        if msg.role == "tool" && msg.content.len() > max_chars {
-                            msg.content = truncate_tool_result(&msg.content, max_chars);
+                    if attempt == 0 {
+                        // Attempt 0: flush insights + multi-stage LLM compaction
+                        self.flush_session_to_memory(messages).await;
+                        self.compact_conversation_history(messages, session_id).await;
+                    } else if attempt == 1 {
+                        // Attempt 1: truncate oversized tool results + compact again
+                        let max_chars = calculate_max_tool_result_chars(
+                            self.config.context_window_tokens / 2,
+                        );
+                        for msg in messages.iter_mut() {
+                            if msg.role == "tool" && msg.content.len() > max_chars {
+                                msg.content = truncate_tool_result(&msg.content, max_chars);
+                            }
                         }
-                    }
-
-                    // Strategy 2: LLM-driven memory compaction (LLM-only, no fallback)
-                    if attempt >= 1 {
-                        let _ = self.memory.compact_llm(&*self.llm, 3).await;
-                    }
-
-                    // Strategy 3: Aggressive history truncation
-                    let budget = if attempt >= 2 {
-                        (self.config.context_window_tokens as f64 * 0.4) as usize
+                        self.compact_conversation_history(messages, session_id).await;
                     } else {
-                        (self.config.context_window_tokens as f64 * 0.6) as usize
-                    };
-                    attempt_messages = truncate_history(messages, budget, 2);
+                        // Attempt 2: aggressive history trim — last resort
+                        let budget = (self.config.context_window_tokens as f64 * 0.4) as usize;
+                        *messages = truncate_history(messages, budget, 2);
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -1016,21 +1449,30 @@ impl Agent {
     }
 
     /// Call LLM with streaming + context overflow recovery.
+    ///
+    /// Mirrors `call_llm_with_overflow_recovery` but uses `complete_stream`.
+    /// Recovery strategy is identical — applied in-place to `messages`:
+    ///   attempt 0 → flush insights + multi-stage LLM compaction
+    ///   attempt 1 → truncate oversized tool results + compact again
+    ///   attempt 2 → aggressive 40% trim (last resort)
     async fn call_llm_stream_with_overflow_recovery(
         &self,
         messages: &mut Vec<ChatMessage>,
-        messages_for_llm: &[ChatMessage],
         tool_defs: &[crate::llm::ToolDefinition],
         tx: tokio::sync::mpsc::Sender<crate::llm::StreamChunk>,
+        session_id: &str,
     ) -> Result<crate::llm::LlmResponse> {
         use crate::llm::is_context_overflow_error;
         use crate::truncation::{calculate_max_tool_result_chars, truncate_tool_result, truncate_history};
 
         const MAX_OVERFLOW_RETRIES: usize = 3;
-        let mut attempt_messages = messages_for_llm.to_vec();
 
         for attempt in 0..=MAX_OVERFLOW_RETRIES {
-            match self.llm.complete_stream(&attempt_messages, tool_defs, tx.clone()).await {
+            if self.cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("Agent run cancelled during overflow recovery");
+            }
+
+            match self.llm.complete_stream(messages, tool_defs, tx.clone()).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) if is_context_overflow_error(&e) && attempt < MAX_OVERFLOW_RETRIES => {
                     log::warn!(
@@ -1038,25 +1480,26 @@ impl Agent {
                         attempt + 1, MAX_OVERFLOW_RETRIES
                     );
 
-                    let max_chars = calculate_max_tool_result_chars(
-                        self.config.context_window_tokens / 2,
-                    );
-                    for msg in messages.iter_mut() {
-                        if msg.role == "tool" && msg.content.len() > max_chars {
-                            msg.content = truncate_tool_result(&msg.content, max_chars);
+                    if attempt == 0 {
+                        // Attempt 0: flush insights + multi-stage LLM compaction
+                        self.flush_session_to_memory(messages).await;
+                        self.compact_conversation_history(messages, session_id).await;
+                    } else if attempt == 1 {
+                        // Attempt 1: truncate oversized tool results + compact again
+                        let max_chars = calculate_max_tool_result_chars(
+                            self.config.context_window_tokens / 2,
+                        );
+                        for msg in messages.iter_mut() {
+                            if msg.role == "tool" && msg.content.len() > max_chars {
+                                msg.content = truncate_tool_result(&msg.content, max_chars);
+                            }
                         }
-                    }
-
-                    if attempt >= 1 {
-                        let _ = self.memory.compact_llm(&*self.llm, 3).await;
-                    }
-
-                    let budget = if attempt >= 2 {
-                        (self.config.context_window_tokens as f64 * 0.4) as usize
+                        self.compact_conversation_history(messages, session_id).await;
                     } else {
-                        (self.config.context_window_tokens as f64 * 0.6) as usize
-                    };
-                    attempt_messages = truncate_history(messages, budget, 2);
+                        // Attempt 2: aggressive history trim — last resort
+                        let budget = (self.config.context_window_tokens as f64 * 0.4) as usize;
+                        *messages = truncate_history(messages, budget, 2);
+                    }
                 }
                 Err(e) => return Err(e),
             }
