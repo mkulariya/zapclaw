@@ -108,14 +108,28 @@ fn collect_runtime_evidence() -> RuntimeEvidence {
 
 /// Verify that runtime evidence indicates a verified sandbox.
 ///
-/// A sandbox is only verified when ALL three conditions are true:
-/// 1. Environment sentinel is set (ZAPCLAW_SANDBOXED=1)
-/// 2. Hostname is "zapclaw-sandbox"
-/// 3. Root filesystem is mounted read-only
+/// Linux (bubblewrap): requires all three signals —
+///   1. Environment sentinel ZAPCLAW_SANDBOXED=1
+///   2. Hostname "zapclaw-sandbox" (set by bwrap --hostname)
+///   3. Root filesystem mounted read-only (bwrap --ro-bind / /)
+///
+/// macOS (sandbox-exec): sandbox-exec is policy-based and does NOT create
+/// namespaces, change the hostname, or make the root read-only. The env
+/// sentinel is therefore the only available verification signal.
 fn runtime_evidence_verified(evidence: &RuntimeEvidence) -> bool {
-    evidence.env_claimed
-        && evidence.hostname_matches_sandbox
-        && evidence.root_mount_read_only
+    if !evidence.env_claimed {
+        return false;
+    }
+    // Linux: require bwrap-specific runtime proof on top of the env sentinel.
+    #[cfg(target_os = "linux")]
+    {
+        evidence.hostname_matches_sandbox && evidence.root_mount_read_only
+    }
+    // macOS / other: env sentinel is the only signal we can check.
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
 }
 
 /// Check if hostname matches expected sandbox hostname.
@@ -169,24 +183,21 @@ fn parse_root_readonly(mountinfo: &str) -> Option<bool> {
     None
 }
 
-/// Resolve bootstrap action from evidence and bwrap availability.
+/// Resolve bootstrap action from evidence and sandbox tool availability.
 ///
 /// This is a pure function for easier testing.
+/// `sandbox_available`: true if bwrap (Linux) or sandbox-exec (macOS) is present.
 fn resolve_bootstrap_action(
     evidence: &RuntimeEvidence,
-    bwrap_available: bool,
+    sandbox_available: bool,
 ) -> BootstrapAction {
-    // If evidence is fully verified, we're good
     if runtime_evidence_verified(evidence) {
         return BootstrapAction::VerifiedActive;
     }
 
-    // Evidence not verified - need to do something
-    if bwrap_available {
-        // Can re-exec into sandbox
+    if sandbox_available {
         BootstrapAction::ReExec
     } else {
-        // No bwrap available and not sandboxed - fail closed
         BootstrapAction::FailClosed
     }
 }
@@ -232,42 +243,32 @@ pub fn ensure_sandboxed(workspace: &Path, no_network: bool) -> Result<SandboxSta
         ));
     }
 
-    // Determine what action to take
-    let bwrap_avail = is_bwrap_available();
-    let action = resolve_bootstrap_action(&evidence, bwrap_avail);
+    // Platform-specific sandbox tool availability check.
+    #[cfg(target_os = "linux")]
+    let sandbox_avail = is_bwrap_available();
+    #[cfg(target_os = "macos")]
+    let sandbox_avail = is_sandbox_exec_available();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let sandbox_avail = false;
+
+    let action = resolve_bootstrap_action(&evidence, sandbox_avail);
 
     match action {
-        BootstrapAction::VerifiedActive => {
-            // Sandbox is verified - good to go
-            Ok(SandboxState::Active)
-        }
+        BootstrapAction::VerifiedActive => Ok(SandboxState::Active),
         BootstrapAction::ReExec => {
-            // Need to re-exec into sandbox
             if is_spoofed {
                 eprintln!("⚠️  WARNING: ZAPCLAW_SANDBOXED=1 is set but runtime verification failed.");
                 eprintln!("   Re-executing into real sandbox to correct this...");
             }
-            reexec_into_sandbox(workspace, no_network, attempt + 1)
+            // Platform-specific re-exec path.
+            #[cfg(target_os = "linux")]
+            return reexec_into_sandbox(workspace, no_network, attempt + 1);
+            #[cfg(target_os = "macos")]
+            return reexec_into_sandbox_exec(workspace, no_network, attempt + 1);
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            unreachable!("ReExec reached on unsupported platform")
         }
-        BootstrapAction::FailClosed => {
-            // No bwrap and not sandboxed - FAIL CLOSED with helpful error
-            Err(anyhow!(
-                "Sandbox is required but bubblewrap (bwrap) is not installed.\n\
-                \n\
-                ZapClaw runs inside a bubblewrap sandbox for security by default.\n\
-                To install bubblewrap:\n\
-                \n\
-                Ubuntu/Debian:  sudo apt install bubblewrap\n\
-                Fedora:         sudo dnf install bubblewrap\n\
-                Arch Linux:     sudo pacman -S bubblewrap\n\
-                macOS:          brew install bubblewrap\n\
-                \n\
-                Alternatively, to DISABLE the sandbox (NOT recommended for production):\n\
-                --no-sandbox\n\
-                \n\
-                For more information, see: https://github.com/containers/bubblewrap"
-            ))
-        }
+        BootstrapAction::FailClosed => Err(fail_closed_error()),
     }
 }
 
@@ -356,6 +357,155 @@ fn reexec_into_sandbox(workspace: &Path, no_network: bool, attempt: u8) -> Resul
             .context("Failed to spawn sandboxed process")?;
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+// ── macOS sandbox-exec support ───────────────────────────────────────────
+
+/// Check if macOS sandbox-exec is available.
+#[cfg(target_os = "macos")]
+fn is_sandbox_exec_available() -> bool {
+    std::path::Path::new("/usr/bin/sandbox-exec").exists()
+}
+
+/// Generate a Seatbelt policy profile string for sandbox-exec.
+///
+/// The profile is default-deny. The workspace path and network rule are
+/// substituted at generation time so a static file is not needed.
+#[cfg(target_os = "macos")]
+fn generate_seatbelt_profile(workspace: &Path, no_network: bool) -> String {
+    let workspace_str = workspace.to_string_lossy();
+    let network_rule = if no_network {
+        "(deny network*)"
+    } else {
+        // Allow all network — ZapClaw's egress guard handles allowlisting
+        // at the application layer (SSRF protection, domain allowlist).
+        "(allow network*)"
+    };
+    format!(
+        r#"(version 1)
+(deny default)
+(allow process-exec process-fork)
+(allow signal (target self))
+(allow file-read* file-write* (subpath "{workspace_str}"))
+(allow file-read*
+    (subpath "/usr/lib")
+    (subpath "/usr/share")
+    (subpath "/System/Library")
+    (subpath "/Library/Apple")
+    (subpath "/private/var/db/timezone")
+    (literal "/dev/null")
+    (literal "/dev/zero")
+    (literal "/dev/urandom")
+    (literal "/dev/random"))
+(allow file-write*
+    (literal "/dev/null"))
+(allow file-read* file-write*
+    (subpath "/private/tmp")
+    (subpath "/tmp"))
+(allow mach-lookup)
+(allow ipc-posix-shm)
+(allow sysctl-read)
+{network_rule}
+"#
+    )
+}
+
+/// Re-exec the current process under a macOS sandbox-exec Seatbelt sandbox.
+///
+/// Generates a Seatbelt profile, writes it to a temp file, then exec()s
+/// `sandbox-exec -f <profile> <binary> <args>` — replacing this process.
+/// Does NOT return on success.
+#[cfg(target_os = "macos")]
+fn reexec_into_sandbox_exec(workspace: &Path, no_network: bool, attempt: u8) -> Result<SandboxState> {
+    let exe = std::env::current_exe()
+        .context("Failed to get current executable path")?;
+
+    // Resolve workspace to absolute path for the Seatbelt profile subpath rule.
+    let workspace_abs = if workspace.is_absolute() {
+        workspace.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Failed to get current directory")?
+            .join(workspace)
+    };
+
+    // Create workspace if it doesn't exist.
+    if !workspace_abs.exists() {
+        std::fs::create_dir_all(&workspace_abs)
+            .context("Failed to create workspace directory")?;
+    }
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let host_home = resolve_host_home_for_reexec();
+
+    // Write Seatbelt profile to a temp file (PID-namespaced to avoid collisions).
+    let profile = generate_seatbelt_profile(&workspace_abs, no_network);
+    let profile_path = std::env::temp_dir()
+        .join(format!("zapclaw_sb_{}.sb", std::process::id()));
+    std::fs::write(&profile_path, &profile)
+        .context("Failed to write Seatbelt profile to temp file")?;
+
+    let mut cmd = std::process::Command::new("/usr/bin/sandbox-exec");
+    cmd.args(["-f", profile_path.to_str().unwrap_or("/tmp/zapclaw.sb")]);
+
+    // Set environment variables (mirrors the bwrap --setenv calls).
+    cmd.env("HOME", workspace_abs.to_string_lossy().as_ref());
+    cmd.env("ZAPCLAW_SANDBOXED", "1");
+    cmd.env("ZAPCLAW_SANDBOX_ATTEMPT", attempt.to_string());
+    if let Some(host_home_path) = host_home {
+        cmd.env("ZAPCLAW_HOST_HOME", host_home_path.to_string_lossy().as_ref());
+    }
+
+    // Re-exec self with original arguments.
+    cmd.arg(&exe);
+    cmd.args(&args);
+
+    // exec() replaces this process — never returns on success.
+    use std::os::unix::process::CommandExt;
+    let err = cmd.exec();
+
+    // Only reached on exec failure — clean up the temp profile.
+    let _ = std::fs::remove_file(&profile_path);
+    Err(anyhow!("Failed to exec into sandbox-exec sandbox: {}", err))
+}
+
+// ── Fail-closed error messages ───────────────────────────────────────────
+
+/// Platform-appropriate fail-closed error when no sandbox tool is available.
+fn fail_closed_error() -> anyhow::Error {
+    #[cfg(target_os = "linux")]
+    return anyhow!(
+        "Sandbox is required but bubblewrap (bwrap) is not installed.\n\
+        \n\
+        ZapClaw runs inside a bubblewrap sandbox for security by default.\n\
+        To install bubblewrap:\n\
+        \n\
+        Ubuntu/Debian:  sudo apt install bubblewrap\n\
+        Fedora:         sudo dnf install bubblewrap\n\
+        Arch Linux:     sudo pacman -S bubblewrap\n\
+        \n\
+        Alternatively, to DISABLE the sandbox (NOT recommended for production):\n\
+        --no-sandbox\n\
+        \n\
+        For more information, see: https://github.com/containers/bubblewrap"
+    );
+    #[cfg(target_os = "macos")]
+    return anyhow!(
+        "Sandbox is required but /usr/bin/sandbox-exec is not available.\n\
+        \n\
+        sandbox-exec is built into macOS and should always be present.\n\
+        If it is missing, your macOS installation may be damaged — try:\n\
+        \n\
+        xcode-select --install\n\
+        \n\
+        Alternatively, to DISABLE the sandbox (NOT recommended for production):\n\
+        --no-sandbox"
+    );
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return anyhow!(
+        "Sandboxing is not supported on this platform.\n\
+        Use --no-sandbox to disable sandbox enforcement (NOT recommended)."
+    );
 }
 
 #[cfg(test)]

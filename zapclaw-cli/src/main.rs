@@ -696,7 +696,10 @@ async fn main() -> Result<()> {
     println!("  Confirm:    {}", if config.require_confirmation { "yes" } else { "no" });
     println!("  Egress:     {}", if config.enable_egress_guard { "enabled" } else { "DISABLED (--no-egress-guard, UNSAFE)" });
     println!("  Sandbox:    {}", match sandbox_state {
-        zapclaw_core::sandbox::SandboxState::Active => "active (bubblewrap, verified)",
+        zapclaw_core::sandbox::SandboxState::Active => {
+            if cfg!(target_os = "macos") { "active (sandbox-exec, policy-based)" }
+            else { "active (bubblewrap, verified)" }
+        }
         zapclaw_core::sandbox::SandboxState::Disabled => "DISABLED (--no-sandbox, UNSAFE)",
     });
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");

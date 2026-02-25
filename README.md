@@ -27,7 +27,7 @@ ZapClaw fixes all of these while staying lightweight and fast.
 | Default network exposure | **None** (localhost only) | `0.0.0.0:18789` |
 | Prompt injection guard | ✅ Multi-layer | ❌ None |
 | Workspace confinement | ✅ Symlink-safe | ❌ Partial |
-| Sandbox | ✅ Bubblewrap (mandatory) | ❌ None |
+| Sandbox | ✅ Platform-native (bwrap/sandbox-exec) | ❌ None |
 | LLM support | Ollama (local) + Cloud | Cloud only |
 | Dependencies | ~25 crates | 60+ npm packages |
 
@@ -35,25 +35,50 @@ ZapClaw fixes all of these while staying lightweight and fast.
 
 ### Install
 
+**🚀 Recommended: Bootstrap Installer (One Command)**
+
+```bash
+git clone https://github.com/your-org/zapclaw.git
+cd zapclaw
+./bootstrap.sh
+```
+
+The bootstrap script automatically installs:
+- Rust toolchain (if needed)
+- System dependencies (build-essential, pkg-config)
+- **Sandbox tool** (Bubblewrap on Linux, built-in sandbox-exec on macOS)
+- Ollama (for embeddings/indexing)
+- Embedding model (`nomic-embed-text:v1.5`)
+- ZapClaw binary
+
+**📖 See [INSTALL.md](INSTALL.md) for detailed installation instructions.**
+
+---
+
+**🔧 Manual Installation**
+
 ```bash
 # 1. Install Rust (one-time, skip if you already have it)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# 2. Install bubblewrap (required — ZapClaw runs inside a sandbox)
+# 2. Install sandbox tool (platform-specific)
+# Linux:
 sudo apt install bubblewrap        # Debian/Ubuntu
 # sudo dnf install bubblewrap      # Fedora
 # sudo pacman -S bubblewrap        # Arch
-# brew install bubblewrap           # macOS
 
-# 3. Install Ollama (one-time, only required for local LLM inference)
+# macOS: No installation needed! Uses built-in sandbox-exec
+# If missing, run: xcode-select --install
+
+# 3. Install Ollama (one-time, for memory embeddings)
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull phi3:mini
+ollama pull nomic-embed-text:v1.5   # Required for memory embeddings
 
 # 4. Install ZapClaw
-cargo install --git https://github.com/your-org/zapclaw.git zapclaw-cli
+cargo install --path zapclaw-cli
 ```
 
-That's it. Now `zapclaw` is available as a command from anywhere. It automatically runs inside a bubblewrap sandbox for security.
+That's it. Now `zapclaw` is available as a command from anywhere. It automatically runs inside a platform-native sandbox for security (bubblewrap on Linux, sandbox-exec on macOS).
 
 ### Run
 
@@ -125,14 +150,17 @@ zapclaw/
 
 ### Defense in Depth
 
-1. **Input Sanitization** — Multi-pattern regex guard against prompt injection
-2. **Workspace Confinement** — All file I/O restricted to workspace (symlink-safe canonicalization)
-3. **No Delete Operations** — File tool supports read/write/append only
-4. **Network Isolation** — Zero default exposure; outbound/inbound tunnels disabled by default
-5. **Rate Limiting** — Sliding-window limiter on outbound requests
-6. **Domain Allowlisting** — Only approved domains reachable via outbound tunnel
-7. **mTLS Authentication** — Mutual TLS for cloud API connections
-8. **Sandbox** — Mandatory bubblewrap isolation (read-only root FS, PID namespace, capability drop)
+1. **Platform-Native Sandbox** — Mandatory sandbox on all platforms:
+   - **Linux**: Bubblewrap (read-only root FS, PID namespace, capability drop)
+   - **macOS**: sandbox-exec (Seatbelt policy-based, default-deny)
+   - **Android**: None (kernel limitations) - requires `--no-sandbox`
+2. **Input Sanitization** — Multi-pattern regex guard against prompt injection
+3. **Workspace Confinement** — All file I/O restricted to workspace (symlink-safe canonicalization)
+4. **No Delete Operations** — File tool supports read/write/append only
+5. **Network Isolation** — Zero default exposure; outbound/inbound tunnels disabled by default
+6. **Rate Limiting** — Sliding-window limiter on outbound requests
+7. **Domain Allowlisting** — Only approved domains reachable via outbound tunnel
+8. **mTLS Authentication** — Mutual TLS for cloud API connections
 9. **Human Confirmation** — Required for sensitive tool calls
 10. **Max Steps Guard** — Agent loop capped at 15 iterations
 
@@ -212,7 +240,7 @@ Options:
       --max-steps <N>       Max agent steps per task [default: 15]
   -t, --task <TASK>         Run single task and exit
       --no-confirm          Disable confirmation prompts
-      --no-sandbox          Skip bubblewrap sandbox (dev only)
+      --no-sandbox          Skip sandbox (dev only)
       --sandbox-no-network  Disable network inside sandbox
       --enable-inbound      Enable remote JSON-RPC server
       --inbound-port <PORT> Inbound server port [default: 9876]
@@ -252,15 +280,21 @@ Options:
 
 ## Sandbox
 
-ZapClaw **always** runs inside a bubblewrap (bwrap) sandbox by default. The binary self-wraps: on startup, if not already sandboxed, it re-execs itself inside bwrap with full namespace isolation.
+ZapClaw **always** runs inside a platform-native sandbox by default. The binary self-wraps: on startup, if not already sandboxed, it re-execs itself under the appropriate sandbox tool for the current OS.
 
-**Sandbox properties:**
+**Linux — Bubblewrap (bwrap):**
 - Read-only root filesystem
 - Isolated PID, IPC, UTS namespaces
 - All capabilities dropped
 - Only the workspace directory is writable
 - Isolated /tmp
 - Process dies with parent
+
+**macOS — sandbox-exec (Seatbelt):**
+- Default-deny policy (only explicitly allowed operations permitted)
+- Workspace read/write allowed; rest of filesystem read-only or denied
+- Network controlled by policy (allow all by default; ZapClaw's egress guard handles allowlisting)
+- Built into macOS — no installation required
 
 Network is enabled by default (needed for Ollama on localhost and cloud APIs). Use `--sandbox-no-network` to disable.
 
@@ -330,7 +364,7 @@ export ZAPCLAW_REMOTE_KEY="<your-key>"
 - All inbound tasks pass through the input sanitizer
 - File operations confined to workspace via Confiner
 - Transport encrypted via SSH tunnel
-- Agent still runs inside bubblewrap sandbox
+- Agent still runs inside platform sandbox (bubblewrap on Linux, sandbox-exec on macOS)
 
 ## Testing
 

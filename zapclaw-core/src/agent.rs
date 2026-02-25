@@ -1575,12 +1575,12 @@ impl Agent {
         // Sandbox info — conditional on actual sandbox state
         sections.push("## Sandbox".to_string());
         if self.sandbox_active {
-            sections.push("You are running in a sandboxed runtime (bubblewrap namespace isolation).".to_string());
+            sections.push("You are running in a sandboxed runtime.".to_string());
             sections.push("All file operations are confined to the workspace. Symlinks that escape the workspace are blocked.".to_string());
             sections.push("Network access is controlled by outbound tunnel policy. Dangerous commands are blocked by the exec tool.".to_string());
         } else {
             sections.push("WARNING: Running outside sandbox. File confinement is enforced by the Confiner module only.".to_string());
-            sections.push("For full security, install bubblewrap and run without --no-sandbox.".to_string());
+            sections.push("For full security, ensure the platform sandbox tool is available and run without --no-sandbox.".to_string());
         }
         sections.push(String::new());
 
