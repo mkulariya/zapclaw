@@ -26,6 +26,12 @@ use zapclaw_tools::web_search_tool::WebSearchTool;
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::io::IsTerminal;
+use std::borrow::Cow;
+use rustyline::completion::{Completer, Pair};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::Validator;
+use rustyline::Helper;
 
 /// ZapClaw 🦞 — Secure, lightweight AI agent
 #[derive(Parser, Debug)]
@@ -680,29 +686,33 @@ async fn main() -> Result<()> {
     // Update config workspace_path with resolved canonical path
     config.workspace_path = workspace.clone();
 
-    println!("🦞 ZapClaw v{}", env!("CARGO_PKG_VERSION"));
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("  Workspace:  {}", workspace.display());
-    println!("  Model:      {}", config.model_name);
-    println!("  Endpoint:   {} ({})",
-        llm_settings.api_base_url,
-        match llm_settings.endpoint_kind {
-            EndpointKind::Loopback => "loopback, api-key optional",
-            EndpointKind::Remote => "remote, api-key required",
+    // Codex-style compact header
+    let dir_display = {
+        let path = workspace.display().to_string();
+        if let Ok(home) = std::env::var("HOME") {
+            if path.starts_with(&home) {
+                format!("~{}", &path[home.len()..])
+            } else {
+                path
+            }
+        } else {
+            path
         }
-    );
-    println!("  Max steps:  {}", config.max_steps);
-    println!("  Timeout:    {}s", config.tool_timeout_secs);
-    println!("  Confirm:    {}", if config.require_confirmation { "yes" } else { "no" });
-    println!("  Egress:     {}", if config.enable_egress_guard { "enabled" } else { "DISABLED (--no-egress-guard, UNSAFE)" });
-    println!("  Sandbox:    {}", match sandbox_state {
-        zapclaw_core::sandbox::SandboxState::Active => {
-            if cfg!(target_os = "macos") { "active (sandbox-exec, policy-based)" }
-            else { "active (bubblewrap, verified)" }
-        }
-        zapclaw_core::sandbox::SandboxState::Disabled => "DISABLED (--no-sandbox, UNSAFE)",
-    });
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    };
+    println!();
+    println!("  >_ \x1b[1mZapClaw\x1b[0m  \x1b[2m(v{})\x1b[0m", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("  model:      {:<34}\x1b[2m/help for commands\x1b[0m", config.model_name);
+    println!("  directory:  {}", dir_display);
+    // Security warnings — only shown when protections are disabled
+    if sandbox_state == zapclaw_core::sandbox::SandboxState::Disabled {
+        println!();
+        println!("  \x1b[1;33m⚠  sandbox disabled (--no-sandbox)\x1b[0m");
+    }
+    if !config.enable_egress_guard {
+        println!("  \x1b[1;33m⚠  egress guard disabled (UNSAFE)\x1b[0m");
+    }
+    println!();
 
     // Initialize components
     let api_key = llm_settings.api_key;
@@ -826,8 +836,6 @@ async fn main() -> Result<()> {
     };
     tools.register(Arc::new(search_tool));
 
-    println!("  Tools:      {}", tools.tool_names().join(", "));
-    println!();
 
     let sandbox_active = sandbox_state == zapclaw_core::sandbox::SandboxState::Active;
 
@@ -940,13 +948,15 @@ async fn main() -> Result<()> {
     });
 
     // Interactive REPL mode
-    println!("Type your tasks below. Use 'exit' or Ctrl+C to quit.\n");
-
-    let mut rl = rustyline::DefaultEditor::new()
+    let rl_config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::List)
+        .build();
+    let mut rl = rustyline::Editor::<ZapClawHelper, rustyline::history::DefaultHistory>::with_config(rl_config)
         .context("Failed to initialize line editor")?;
+    rl.set_helper(Some(ZapClawHelper));
 
     loop {
-        let readline = rl.readline("🦞 > ");
+        let readline = rl.readline("🦞 ❯ ");
         match readline {
             Ok(line) => {
                 let input = line.trim();
@@ -955,17 +965,17 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                if input == "exit" || input == "quit" || input == "q" {
+                if input == "exit" || input == "quit" || input == "q" || input == "/exit" {
                     println!("👋 Goodbye!");
                     break;
                 }
 
-                if input == "help" {
+                if input == "help" || input == "/help" {
                     print_help();
                     continue;
                 }
 
-                if input == "tools" {
+                if input == "tools" || input == "/tools" {
                     print_tools(&agent);
                     continue;
                 }
@@ -1442,6 +1452,85 @@ async fn cron_background_loop(
     }
 }
 
+// ---------------------------------------------------------------------------
+// REPL slash-command completion
+// ---------------------------------------------------------------------------
+
+/// All slash-prefixed REPL commands exposed in the completion menu.
+static SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/help",        "Show help and examples"),
+    ("/tools",       "List available tools"),
+    ("/status",      "Show session info (memory, tokens, session ID)"),
+    ("/compact",     "Compact conversation history (LLM summarisation)"),
+    ("/resume",      "List or resume a previous session"),
+    ("/update",      "Self-update ZapClaw from git"),
+    ("/exit",        "Exit ZapClaw"),
+];
+
+struct ZapClawHelper;
+
+impl Completer for ZapClawHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        if !line.starts_with('/') {
+            return Ok((0, vec![]));
+        }
+        let prefix = &line[..pos];
+        let matches: Vec<Pair> = SLASH_COMMANDS
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(prefix))
+            .map(|(cmd, desc)| Pair {
+                display: format!("{:<14}  {}", cmd, desc),
+                replacement: cmd.to_string(),
+            })
+            .collect();
+        Ok((0, matches))
+    }
+}
+
+impl Hinter for ZapClawHelper {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &rustyline::Context<'_>) -> Option<String> {
+        if !line.starts_with('/') || pos != line.len() || line.len() < 2 {
+            return None;
+        }
+        SLASH_COMMANDS
+            .iter()
+            .find(|(cmd, _)| cmd.starts_with(line) && *cmd != line)
+            .map(|(cmd, _)| cmd[pos..].to_string())
+    }
+}
+
+impl Highlighter for ZapClawHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
+    }
+
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        if line.starts_with('/') {
+            Cow::Owned(format!("\x1b[36m{}\x1b[0m", line))
+        } else {
+            Cow::Borrowed(line)
+        }
+    }
+
+    fn highlight_char(&self, line: &str, _pos: usize, _forced: bool) -> bool {
+        line.starts_with('/')
+    }
+}
+
+impl Validator for ZapClawHelper {}
+impl Helper for ZapClawHelper {}
+
+// ---------------------------------------------------------------------------
+
 fn print_help() {
     println!("
 🦞 ZapClaw Help
@@ -1459,17 +1548,16 @@ fn print_help() {
     What's on https://example.com?
     Remember that I prefer dark mode
     Set a reminder in 30 minutes to check the build
-    Show session status
 
-  Commands:
-    exit/quit/q  — Exit ZapClaw
-    help         — Show this help
-    tools        — List available tools
-    /compact     — Compact conversation history (LLM summarisation)
-    /resume      — List recent sessions
-    /resume <id> — Resume a previous session
-    /update      — Self-update from git
-    /status      — Show session info
+  Commands:             (type / then Tab to browse)
+    /help         Show this help
+    /tools        List available tools
+    /status       Show session info (memory, tokens, session ID)
+    /compact      Compact conversation history (LLM summarisation)
+    /resume       List recent sessions
+    /resume <id>  Resume a specific session
+    /update       Self-update from git
+    /exit         Exit ZapClaw  (also: exit, quit, q)
 
   Skills:
     Place SKILL.md files in .skills/<name>/SKILL.md
