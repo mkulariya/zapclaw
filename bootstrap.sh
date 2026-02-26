@@ -277,6 +277,61 @@ install_zapclaw() {
     fi
 }
 
+# Create ZapClaw home configuration file
+create_zapclaw_home_config() {
+    log_info "Creating ZapClaw home configuration..."
+
+    local config_dir="$HOME/.zapclaw"
+    local config_file="$config_dir/zapclaw.json"
+
+    # Create directory with secure permissions
+    mkdir -p "$config_dir" 2>/dev/null || {
+        log_error "Failed to create config directory: $config_dir"
+        return 1
+    }
+
+    # Set directory permissions (0700 on Unix systems)
+    # Skip on macOS and Termux (chmod might behave differently)
+    if [ "$(uname)" != "Darwin" ] && [ -z "${TERMUX_VERSION:-}" ]; then
+        chmod 700 "$config_dir" 2>/dev/null || true
+    fi
+
+    # Create config file with sensible defaults
+    # NOTE: api_base_url and model_name are EMPTY (must be set by user)
+    cat > "$config_file" << 'EOF'
+{
+  "workspace_path": "./zapclaw_workspace",
+  "api_base_url": "",
+  "model_name": "",
+  "max_steps": 15,
+  "tool_timeout_secs": 30,
+  "require_confirmation": true,
+  "enable_egress_guard": true,
+  "context_window_tokens": 128000,
+  "memory_embedding_base_url": "http://localhost:11434/v1",
+  "memory_embedding_model": "nomic-embed-text:v1.5",
+  "memory_embedding_target_dims": 512,
+  "memory_embedding_batch_size": 32,
+  "memory_daemon_enabled": true,
+  "memory_sync_interval_secs": 15,
+  "memory_sync_on_search": true,
+  "memory_require_embeddings": true,
+  "memory_allow_lexical_fallback": false,
+  "memory_cache_max_entries": 50000,
+  "telegram_enabled": false
+}
+EOF
+
+    # Set file permissions (0600 on Unix systems)
+    # Skip on macOS and Termux
+    if [ "$(uname)" != "Darwin" ] && [ -z "${TERMUX_VERSION:-}" ]; then
+        chmod 600 "$config_file" 2>/dev/null || true
+    fi
+
+    log_success "Home config created at $config_file"
+    log_warn "Please edit the config file to set api_base_url and model_name"
+}
+
 # Verify installation
 verify_installation() {
     if ! command_exists zapclaw; then
@@ -299,25 +354,40 @@ print_next_steps() {
     echo ""
     echo "ZapClaw is now installed and ready to use!"
     echo ""
-    echo "📝 Configuration:"
-    echo "  - Config file: ~/.zapclaw/zapclaw.json (auto-created on first run)"
-    echo "  - Workspace:   ./zapclaw_workspace (default)"
+    echo "📝 Configuration File Created:"
+    echo "  ~/.zapclaw/zapclaw.json"
     echo ""
-    echo "🚀 Quick Start:"
+    echo -e "${YELLOW}⚠️  IMPORTANT: Complete setup in 2 steps:${NC}"
     echo ""
-    echo "  1. Interactive mode (REPL):"
-    echo "     ${YELLOW}zapclaw${NC}"
+    echo "  1. Edit config file to set your LLM:"
+    echo "     ${YELLOW}nano ~/.zapclaw/zapclaw.json${NC}"
     echo ""
-    echo "  2. Single task (requires LLM configuration):"
-    echo "     ${YELLOW}ZAPCLAW_API_BASE_URL=http://localhost:11434/v1 \\${NC}"
-    echo "     ${YELLOW}ZAPCLAW_MODEL=your-model \\${NC}"
-    echo "     ${YELLOW}zapclaw --task \"Your task here\"${NC}"
+    echo "     Set these fields:"
+    echo "       ${GREEN}\"api_base_url\"${NC}: \"http://localhost:11434/v1\"  (for Ollama)"
+    echo "                           \"https://api.openai.com/v1\"  (for OpenAI)"
+    echo "       ${GREEN}\"model_name\"${NC}:   \"phi3:mini\"  (for Ollama)"
+    echo "                           \"gpt-4o\"  (for OpenAI)"
     echo ""
-    echo "  3. Using cloud LLM (e.g., OpenAI):"
-    echo "     ${YELLOW}ZAPCLAW_API_BASE_URL=https://api.openai.com/v1 \\${NC}"
-    echo "     ${YELLOW}ZAPCLAW_API_KEY=sk-your-key \\${NC}"
-    echo "     ${YELLOW}ZAPCLAW_MODEL=gpt-4o \\${NC}"
-    echo "     ${YELLOW}zapclaw --task \"Explain quantum computing\"${NC}"
+    echo "  2. For cloud LLMs, set API key in your shell profile:"
+    if is_termux; then
+        echo "     ${YELLOW}echo 'export ZAPCLAW_API_KEY=sk-your-key' >> ~/.bashrc${NC}"
+        echo "     ${YELLOW}source ~/.bashrc${NC}"
+    else
+        echo "     ${YELLOW}echo 'export ZAPCLAW_API_KEY=sk-your-key' >> ~/.bashrc${NC} (or ~/.zshrc)"
+        echo "     ${YELLOW}source ~/.bashrc${NC} (or source ~/.zshrc)"
+    fi
+    echo ""
+    echo "🚀 Quick Start (after configuration):"
+    echo ""
+    echo "  Desktop/Server:"
+    echo "     ${YELLOW}zapclaw${NC}                              # Interactive REPL"
+    echo "     ${YELLOW}zapclaw --task \"Explain Rust\"${NC}       # Single task"
+    echo ""
+    if is_termux; then
+        echo "  Android/Termux:"
+        echo "     ${YELLOW}zapclaw --no-sandbox${NC}              # Add this flag"
+        echo "     ${YELLOW}zapclaw --enable-android --no-sandbox${NC}  # Android control"
+    fi
     echo ""
     echo "📚 Memory & Embeddings:"
     echo "  - Embedding model: ${OLLAMA_EMBEDDING_MODEL}"
@@ -336,6 +406,7 @@ print_next_steps() {
     echo ""
     echo "📖 Documentation:"
     echo "  - README.md: Project overview and features"
+    echo "  - INSTALL.md: Installation guide"
     echo "  - CLAUDE.md: Developer guide"
     echo "  - Run 'zapclaw --help' for all options"
     echo ""
@@ -378,8 +449,13 @@ main() {
     echo ""
 
     # Step 5: Build and install ZapClaw
-    log_info "[Step 5/5] Building and installing ZapClaw..."
+    log_info "[Step 5/6] Building and installing ZapClaw..."
     install_zapclaw || exit 1
+    echo ""
+
+    # Step 6: Create home configuration
+    log_info "[Step 6/6] Creating home configuration..."
+    create_zapclaw_home_config || exit 1
     echo ""
 
     # Verify and print next steps

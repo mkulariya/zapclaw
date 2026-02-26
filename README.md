@@ -175,6 +175,107 @@ The browser tool blocks all private/local network addresses:
 
 ZapClaw uses a layered configuration system with automatic home config creation:
 
+### ⚡ Quick Setup (First Time)
+
+**After running `./bootstrap.sh`, complete setup in 3 steps:**
+
+#### Step 1: Edit Config File
+
+```bash
+# If config file doesn't exist, trigger auto-creation:
+zapclaw --help
+
+# Edit the global config file
+nano ~/.zapclaw/zapclaw.json
+```
+
+**Set these required fields:**
+
+```json
+{
+  "workspace_path": "./zapclaw_workspace",
+  "api_base_url": "http://localhost:11434/v1",    // For Ollama
+  "model_name": "phi3:mini",                       // For Ollama
+  "max_steps": 15,
+  "tool_timeout_secs": 30,
+  "require_confirmation": true,
+  "enable_egress_guard": true,
+  "context_window_tokens": 128000,
+  "memory_embedding_base_url": "http://localhost:11434/v1",
+  "memory_embedding_model": "nomic-embed-text:v1.5",
+  "memory_require_embeddings": true
+}
+```
+
+**For different LLM providers:**
+
+| Provider | `api_base_url` | `model_name` |
+|----------|----------------|--------------|
+| **Ollama (local)** | `http://localhost:11434/v1` | `phi3:mini`, `phi3:medium`, `llama3.2` |
+| **OpenAI** | `https://api.openai.com/v1` | `gpt-4o`, `gpt-4o-mini` |
+| **Anthropic** | `https://api.anthropic.com/v1` | `claude-sonnet-4-5-20250514` |
+| **Groq** | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+
+#### Step 2: Create .env File (For API Keys)
+
+**Desktop/Server:**
+```bash
+# Create .env in your project directory (or home directory)
+cat > ~/.zapclaw/.env << 'EOF'
+# ZapClaw Environment Variables
+# API Keys and Secrets (NEVER commit this file)
+
+# For cloud LLMs (OpenAI, Anthropic, etc.)
+export ZAPCLAW_API_KEY=sk-your-key-here
+
+# Optional: Web Search API (Brave Search)
+export ZAPCLAW_SEARCH_API_KEY=your-brave-api-key
+
+# Optional: Inbound tunnel for remote access
+export ZAPCLAW_INBOUND_KEY=your-inbound-auth-key
+
+# Optional: Telegram bot (requires BOTH token and allowed IDs)
+export ZAPCLAW_TELEGRAM_TOKEN=your-telegram-bot-token
+export ZAPCLAW_TELEGRAM_ALLOWED_IDS=123456789,987654321
+EOF
+
+# Secure the file
+chmod 600 ~/.zapclaw/.env
+
+# Add to shell profile to auto-load
+echo 'source ~/.zapclaw/.env' >> ~/.bashrc  # or ~/.zshrc
+source ~/.bashrc
+```
+
+**Mobile/Termux (Android):**
+```bash
+# Add directly to .bashrc (simpler for mobile)
+cat >> ~/.bashrc << 'EOF'
+
+# ZapClaw API Keys
+export ZAPCLAW_API_KEY=sk-your-key-here
+export ZAPCLAW_SEARCH_API_KEY=your-brave-api-key
+export ZAPCLAW_TELEGRAM_TOKEN=your-telegram-bot-token
+export ZAPCLAW_TELEGRAM_ALLOWED_IDS=123456789,987654321
+EOF
+
+source ~/.bashrc
+```
+
+#### Step 3: Run ZapClaw
+
+**Desktop/Server:**
+```bash
+zapclaw
+```
+
+**Mobile/Termux (Android):**
+```bash
+zapclaw --no-sandbox
+```
+
+---
+
 ### Config File Locations
 
 1. **Home config** (default, auto-created): `~/.zapclaw/zapclaw.json`
@@ -243,6 +344,7 @@ Options:
       --no-sandbox          Skip sandbox (dev only)
       --sandbox-no-network  Disable network inside sandbox
       --enable-inbound      Enable remote JSON-RPC server
+      --enable-android       Enable Android device control via ADB
       --inbound-port <PORT> Inbound server port [default: 9876]
       --inbound-bind <ADDR> Bind address [default: 127.0.0.1]
       --inbound-api-key <KEY> API key for remote auth [env: ZAPCLAW_INBOUND_KEY]
@@ -277,6 +379,9 @@ Options:
 | `math_eval` | Evaluate math expressions (arithmetic, functions, constants) | No |
 | `file_ops` | Read/write/append/list files in workspace | No |
 | `browse_url` | Fetch and read web page content (read-only) | Yes |
+| `android` | Control Android devices via ADB (tap, swipe, type, launch apps) | No* |
+
+**Android Tool**: Requires `--enable-android` flag. Does not require confirmation by default (autonomous operation). See [ANDROID.md](ANDROID.md) for setup instructions.
 
 ## Sandbox
 
@@ -312,6 +417,8 @@ zapclaw --no-sandbox
 ## Remote Access
 
 ZapClaw can be accessed remotely from any machine (laptop, phone, tablet) over SSH. The inbound server is disabled by default and must be explicitly enabled.
+
+**🤖 Android Device Control**: ZapClaw can also autonomously control Android devices via ADB. See [ANDROID.md](ANDROID.md) for complete setup guide.
 
 ### 1. Start the Server
 

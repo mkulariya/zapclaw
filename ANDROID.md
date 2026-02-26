@@ -33,21 +33,71 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
 
 2. **Open Termux** and run:
    ```bash
-   # Install git
-   apt update && apt install git
-   
+   # Update packages
+   pkg update && pkg upgrade
+
+   # Setup storage access
+   termux-setup-storage
+
    # Clone ZapClaw
+   cd ~
    git clone https://github.com/your-org/zapclaw.git
    cd zapclaw
-   
+
    # Run bootstrap script (installs ZapClaw - takes 5-10 minutes)
    ./bootstrap.sh
-   
-   # Install ADB (required for Android control)
+   ```
+
+3. **Complete ZapClaw Configuration**:
+
+   **Step 3a: Trigger config creation (if needed)**
+   ```bash
+   # This auto-creates ~/.zapclaw/zapclaw.json
+   zapclaw --help
+   ```
+
+   **Step 3b: Edit config file**
+   ```bash
+   nano ~/.zapclaw/zapclaw.json
+   ```
+
+   Set these fields:
+   ```json
+   {
+     "workspace_path": "~/zapclaw_workspace",
+     "api_base_url": "http://localhost:11434/v1",
+     "model_name": "phi3:mini",
+     "max_steps": 15,
+     "tool_timeout_secs": 30,
+     "require_confirmation": false,
+     "enable_egress_guard": true,
+     "memory_embedding_base_url": "http://localhost:11434/v1",
+     "memory_embedding_model": "nomic-embed-text:v1.5",
+     "memory_require_embeddings": true
+   }
+   ```
+
+   **Step 3c: Add API keys to .bashrc**
+   ```bash
+   cat >> ~/.bashrc << 'EOF'
+
+   # ZapClaw Configuration
+   export ZAPCLAW_API_KEY=sk-your-key-here
+   export ZAPCLAW_SEARCH_API_KEY=your-brave-api-key
+   export ZAPCLAW_TELEGRAM_TOKEN=your-telegram-bot-token
+   export ZAPCLAW_TELEGRAM_ALLOWED_IDS=123456789,987654321
+   export PATH="$PATH:$HOME/.cargo/bin"
+   EOF
+
+   source ~/.bashrc
+   ```
+
+4. **Install ADB (required for Android control)**:
+   ```bash
    pkg install android-tools
    ```
 
-3. **Enable USB Debugging** on your Android device:
+5. **Enable USB Debugging** on your Android device:
    - Settings → About Phone → Tap "Build Number" 7 times
    - Settings → System → Developer Options → Enable "USB Debugging"
 
@@ -61,10 +111,26 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
    ```bash
    # Interactive REPL mode
    zapclaw --enable-android --no-sandbox --no-confirm
-   
+
    # Single task mode
    zapclaw --enable-android --no-sandbox --task "Take a screenshot"
    ```
+
+**Keep device awake (prevent sleep):**
+```bash
+# Install tmux and termux-api
+pkg install tmux termux-api
+
+# Acquire wakelock
+termux-wake-lock
+
+# Run ZapClaw in tmux session
+tmux new -s zapclaw
+zapclaw --enable-android --no-sandbox --no-confirm
+
+# Detach: Ctrl+B, then D
+# Re-attach: tmux attach -t zapclaw
+```
 
 That's it! ZapClaw is now running on your Android device and can control it autonomously.
 
