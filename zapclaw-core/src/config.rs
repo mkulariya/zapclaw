@@ -72,6 +72,9 @@ pub struct FileConfig {
 
     /// Maximum entries in embedding cache before LRU pruning (default: 50_000)
     pub memory_cache_max_entries: Option<usize>,
+
+    /// Telegram bot enabled (requires ZAPCLAW_TELEGRAM_TOKEN env var)
+    pub telegram_enabled: Option<bool>,
 }
 
 impl Default for FileConfig {
@@ -98,6 +101,7 @@ impl Default for FileConfig {
             memory_require_embeddings: None,
             memory_allow_lexical_fallback: None,
             memory_cache_max_entries: None,
+            telegram_enabled: None,
         }
     }
 }
@@ -177,6 +181,9 @@ pub struct Config {
 
     /// Maximum number of entries in the embedding cache before LRU pruning (default: 50_000)
     pub memory_cache_max_entries: usize,
+
+    /// Telegram bot enabled (requires ZAPCLAW_TELEGRAM_TOKEN and ZAPCLAW_TELEGRAM_ALLOWED_IDS env vars)
+    pub telegram_enabled: bool,
 }
 
 impl Default for Config {
@@ -205,6 +212,7 @@ impl Default for Config {
             memory_require_embeddings: true,
             memory_allow_lexical_fallback: false,
             memory_cache_max_entries: 50_000,
+            telegram_enabled: false,
         }
     }
 }
@@ -944,6 +952,10 @@ impl Config {
             }
         }
 
+        // Telegram enabled only if BOTH env vars are present
+        config.telegram_enabled = std::env::var("ZAPCLAW_TELEGRAM_TOKEN").is_ok()
+            && std::env::var("ZAPCLAW_TELEGRAM_ALLOWED_IDS").is_ok();
+
         config
     }
 
@@ -1211,6 +1223,7 @@ impl Config {
             memory_require_embeddings: Some(self.memory_require_embeddings),
             memory_allow_lexical_fallback: Some(self.memory_allow_lexical_fallback),
             memory_cache_max_entries: Some(self.memory_cache_max_entries),
+            telegram_enabled: Some(self.telegram_enabled),
         };
 
         serde_json::to_string_pretty(&file_config)

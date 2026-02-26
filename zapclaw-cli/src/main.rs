@@ -23,6 +23,7 @@ use zapclaw_tools::patch_tool::PatchTool;
 use zapclaw_tools::process_tool::ProcessTool;
 use zapclaw_tools::session_tool::SessionTool;
 use zapclaw_tools::web_search_tool::WebSearchTool;
+use zapclaw_tunnels::telegram::TelegramListener;
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::io::IsTerminal;
@@ -100,6 +101,10 @@ struct Cli {
     /// Enable remote JSON-RPC server for inbound task submission
     #[arg(long)]
     enable_inbound: bool,
+
+    /// Enable Telegram bot integration (requires ZAPCLAW_TELEGRAM_TOKEN and ZAPCLAW_TELEGRAM_ALLOWED_IDS env vars)
+    #[arg(long = "enable-telegram", default_value = "false")]
+    enable_telegram: bool,
 
     /// Inbound server port
     #[arg(long)]
@@ -879,6 +884,41 @@ async fn main() -> Result<()> {
     let session_store = SessionStore::new(&workspace);
     let mut session_id = uuid::Uuid::new_v4().to_string();
 
+    // Telegram bot integration (if enabled)
+    if cli.enable_telegram {
+        // Read env vars directly (no CLI flags for security)
+        let token = std::env::var("ZAPCLAW_TELEGRAM_TOKEN")
+            .context("ZAPCLAW_TELEGRAM_TOKEN environment variable must be set for Telegram mode")?;
+        
+        let allowed_ids_str = std::env::var("ZAPCLAW_TELEGRAM_ALLOWED_IDS")
+            .context("ZAPCLAW_TELEGRAM_ALLOWED_IDS environment variable must be set for Telegram mode")?;
+        
+        // Capture count before moving
+        let allowed_ids: Vec<i64> = allowed_ids_str
+            .split(',')
+            .map(|s| s.trim().parse::<i64>())
+            .collect::<Result<Vec<_>, _>>()
+            .context("Invalid user IDs in ZAPCLAW_TELEGRAM_ALLOWED_IDS (must be comma-separated numbers)")?;
+        
+        let allowed_count = allowed_ids.len();
+        
+        let telegram = TelegramListener::new(
+            token,
+            allowed_ids,
+            agent.clone(),
+            &workspace,
+        ).context("Failed to initialize Telegram listener")?;
+        
+        // Run Telegram listener in background
+        tokio::spawn(async move {
+            if let Err(e) = telegram.run().await {
+                log::error!("Telegram listener error: {}", e);
+            }
+        });
+        
+        println!("  Telegram:  Enabled ({} whitelisted user(s))", allowed_count);
+    }
+
     // Single task mode — no cron loop needed
     if let Some(task) = cli.task {
         let images = {
@@ -1060,7 +1100,47 @@ async fn main() -> Result<()> {
                     println!("\n📊 Session Status");
                     println!("  Memory files: {}", files.len());
                     println!("  Memory tokens: ~{}", tokens);
-                    println!("  Session ID: {}\n", session_id);
+                    println!("  Session ID: {}", session_id);
+                    println!("  Confirmation mode: {:?}\n", agent.confirmation_mode());
+                    continue;
+                }
+
+                // /confirm command — change confirmation mode mid-session
+                if input == "/confirm" || input.starts_with("/confirm ") {
+                    let arg = input.strip_prefix("/confirm").unwrap_or("").trim();
+
+                    if arg.is_empty() {
+                        // Show current mode
+                        let current = agent.confirmation_mode();
+                        println!("\n🔒 Confirmation Mode: {:?}", current);
+                        println!("  /confirm ask   → Prompt for each tool (default)");
+                        println!("  /confirm allow → Auto-approve all tools (⚠️  DANGEROUS)");
+                        println!("  /confirm deny  → Block all tools requiring confirmation\n");
+                        continue;
+                    }
+
+                    let new_mode = match arg {
+                        "ask" => {
+                            println!("✅ Confirmation mode changed to: Ask (prompt for each tool)");
+                            ConfirmationMode::Ask
+                        }
+                        "allow" => {
+                            println!("⚠️  WARNING: Confirmation mode changed to: ALLOW");
+                            println!("⚠️  All tools will auto-approve WITHOUT prompting!");
+                            println!("⚠️  This is dangerous — use with caution!");
+                            ConfirmationMode::Allow
+                        }
+                        "deny" => {
+                            println!("🚫 Confirmation mode changed to: Deny (block all tools requiring confirmation)");
+                            ConfirmationMode::Deny
+                        }
+                        _ => {
+                            eprintln!("❌ Unknown mode: '{}'. Use: ask, allow, or deny", arg);
+                            continue;
+                        }
+                    };
+
+                    agent.set_confirmation_mode(new_mode);
                     continue;
                 }
 
@@ -1143,6 +1223,7 @@ mod tests {
             sandbox_no_network: false,
             tool_timeout: None,
             enable_inbound: false,
+            enable_telegram: false,
             inbound_port: None,
             inbound_bind: None,
             inbound_api_key: None,
@@ -1461,10 +1542,18 @@ static SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help",        "Show help and examples"),
     ("/tools",       "List available tools"),
     ("/status",      "Show session info (memory, tokens, session ID)"),
+    ("/confirm",     "Show or change confirmation mode"),
     ("/compact",     "Compact conversation history (LLM summarisation)"),
     ("/resume",      "List or resume a previous session"),
     ("/update",      "Self-update ZapClaw from git"),
     ("/exit",        "Exit ZapClaw"),
+];
+
+/// Sub-commands for `/confirm`, shown when the user types `/confirm ` + Tab.
+static CONFIRM_SUBCOMMANDS: &[(&str, &str)] = &[
+    ("ask",   "Prompt for each tool requiring confirmation (default)"),
+    ("allow", "Auto-approve all tools — DANGEROUS"),
+    ("deny",  "Block all tools requiring confirmation"),
 ];
 
 struct ZapClawHelper;
@@ -1481,6 +1570,22 @@ impl Completer for ZapClawHelper {
         if !line.starts_with('/') {
             return Ok((0, vec![]));
         }
+
+        // Sub-command completion: `/confirm <tab>` or `/confirm a<tab>`
+        if line.starts_with("/confirm ") {
+            let sub_prefix = &line["/confirm ".len()..pos];
+            let matches: Vec<Pair> = CONFIRM_SUBCOMMANDS
+                .iter()
+                .filter(|(sub, _)| sub.starts_with(sub_prefix))
+                .map(|(sub, desc)| Pair {
+                    display: format!("{:<8}  {}", sub, desc),
+                    replacement: format!("/confirm {}", sub),
+                })
+                .collect();
+            return Ok((0, matches));
+        }
+
+        // Top-level slash command completion
         let prefix = &line[..pos];
         let matches: Vec<Pair> = SLASH_COMMANDS
             .iter()
@@ -1501,6 +1606,15 @@ impl Hinter for ZapClawHelper {
         if !line.starts_with('/') || pos != line.len() || line.len() < 2 {
             return None;
         }
+        // Inline hint for `/confirm <partial>`
+        if line.starts_with("/confirm ") {
+            let sub = &line["/confirm ".len()..];
+            return CONFIRM_SUBCOMMANDS
+                .iter()
+                .find(|(cmd, _)| cmd.starts_with(sub) && *cmd != sub)
+                .map(|(cmd, _)| cmd[sub.len()..].to_string());
+        }
+        // Inline hint for top-level commands
         SLASH_COMMANDS
             .iter()
             .find(|(cmd, _)| cmd.starts_with(line) && *cmd != line)
@@ -1553,6 +1667,7 @@ fn print_help() {
     /help         Show this help
     /tools        List available tools
     /status       Show session info (memory, tokens, session ID)
+    /confirm      Show or change confirmation mode (ask/allow/deny)
     /compact      Compact conversation history (LLM summarisation)
     /resume       List recent sessions
     /resume <id>  Resume a specific session

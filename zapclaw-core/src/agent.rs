@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -85,6 +85,27 @@ pub enum ConfirmationMode {
     /// Used in headless/inbound mode where no TTY is available.
     /// This is the safe default for unattended operation.
     Deny,
+}
+
+impl ConfirmationMode {
+    /// Convert to u8 for atomic storage.
+    const fn as_u8(self) -> u8 {
+        match self {
+            ConfirmationMode::Ask => 0,
+            ConfirmationMode::Allow => 1,
+            ConfirmationMode::Deny => 2,
+        }
+    }
+
+    /// Convert from u8 from atomic storage.
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => ConfirmationMode::Ask,
+            1 => ConfirmationMode::Allow,
+            2 => ConfirmationMode::Deny,
+            _ => ConfirmationMode::Ask, // Default to safe mode on invalid value
+        }
+    }
 }
 
 /// Resolve confirmation result without prompting.
@@ -321,7 +342,7 @@ pub struct Agent {
     workspace_dir: PathBuf,
     session_store: Option<SessionStore>,
     sandbox_active: bool,
-    confirmation_mode: ConfirmationMode,
+    confirmation_mode: AtomicU8, // Stores ConfirmationMode as u8 for runtime mutability
     egress_guard: Option<EgressGuard>,
     /// Shared cancellation flag — set to `true` to abort the current agent run.
     cancel: Arc<AtomicBool>,
@@ -358,7 +379,7 @@ impl Agent {
             config,
             session_store,
             sandbox_active,
-            confirmation_mode: ConfirmationMode::Ask, // Default to safe interactive mode
+            confirmation_mode: AtomicU8::new(ConfirmationMode::Ask.as_u8()), // Default to safe interactive mode
             egress_guard,
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -378,8 +399,21 @@ impl Agent {
     /// - `Allow`: Auto-approve all tools (dangerous, for --no-confirm)
     /// - `Deny`: Auto-deny tools requiring confirmation (safe default for inbound/headless)
     pub fn with_confirmation_mode(mut self, mode: ConfirmationMode) -> Self {
-        self.confirmation_mode = mode;
+        self.confirmation_mode = AtomicU8::new(mode.as_u8());
         self
+    }
+
+    /// Change the confirmation mode at runtime.
+    ///
+    /// This allows mid-session toggling (e.g., `/confirm allow` in REPL).
+    /// Safe to call through Arc<Agent> without locks.
+    pub fn set_confirmation_mode(&self, mode: ConfirmationMode) {
+        self.confirmation_mode.store(mode.as_u8(), Ordering::SeqCst);
+    }
+
+    /// Get the current confirmation mode.
+    pub fn confirmation_mode(&self) -> ConfirmationMode {
+        ConfirmationMode::from_u8(self.confirmation_mode.load(Ordering::SeqCst))
     }
 
     /// Get the session store (for external session management).
@@ -931,7 +965,7 @@ impl Agent {
                         // Medium risk requires confirmation (same as sensitive tools)
                         let interactive_terminal = has_interactive_terminal();
                         let approved = match confirmation_decision_without_prompt(
-                            self.confirmation_mode,
+                            self.confirmation_mode(),
                             interactive_terminal,
                         ) {
                             Some(true) => {
@@ -1013,7 +1047,7 @@ impl Agent {
 
             // Check approval based on confirmation mode + terminal capabilities.
             let approved = match confirmation_decision_without_prompt(
-                self.confirmation_mode,
+                self.confirmation_mode(),
                 interactive_terminal,
             ) {
                 Some(true) => {
@@ -1024,7 +1058,7 @@ impl Agent {
                     true
                 }
                 Some(false) => {
-                    match self.confirmation_mode {
+                    match self.confirmation_mode() {
                         ConfirmationMode::Deny => {
                             log::warn!(
                                 "🚫 Tool '{}' denied: requires confirmation but running in headless/inbound mode",
@@ -1048,7 +1082,7 @@ impl Agent {
             };
 
             if !approved {
-                let error_msg = match self.confirmation_mode {
+                let error_msg = match self.confirmation_mode() {
                     ConfirmationMode::Ask if !interactive_terminal => format!(
                         "Tool '{}' requires confirmation but no interactive terminal is available.",
                         tool_name

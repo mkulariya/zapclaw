@@ -4,6 +4,7 @@ use zapclaw_core::agent::Tool;
 use zapclaw_core::confiner::Confiner;
 use serde::Deserialize;
 use std::sync::Arc;
+use crate::confirmation::confirm_action;
 
 /// Workspace-confined file operations tool.
 ///
@@ -48,6 +49,33 @@ impl FileTool {
             }
         }
 
+        // -- preview + confirmation --
+        let existing_note = if validated.exists() {
+            let existing_len = std::fs::metadata(&validated).map(|m| m.len()).unwrap_or(0);
+            format!("  \x1b[33mOVERWRITING\x1b[0m existing file ({} bytes)\n", existing_len)
+        } else {
+            String::new()
+        };
+        let preview = if content.len() > 400 {
+            format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &content[..400], content.len())
+        } else {
+            content.to_string()
+        };
+        println!("\n\x1b[1m📝  Write Confirmation\x1b[0m");
+        println!("────────────────────────────────────────────────────");
+        println!("  File:    {}", path);
+        println!("  Size:    {} bytes", content.len());
+        if !existing_note.is_empty() { print!("{}", existing_note); }
+        println!("  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─");
+        for line in preview.lines().take(20) {
+            println!("  {}", line);
+        }
+        println!("────────────────────────────────────────────────────");
+        if !confirm_action("file_ops/write", path) {
+            anyhow::bail!("Write to '{}' denied by user.", path);
+        }
+        // -- end confirmation --
+
         std::fs::write(&validated, content)
             .with_context(|| format!("Failed to write file: {}", validated.display()))?;
 
@@ -56,6 +84,26 @@ impl FileTool {
 
     fn do_append(&self, path: &str, content: &str) -> Result<String> {
         let validated = self.confiner.validate_file(std::path::Path::new(path))?;
+
+        // -- preview + confirmation --
+        let preview = if content.len() > 400 {
+            format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &content[..400], content.len())
+        } else {
+            content.to_string()
+        };
+        println!("\n\x1b[1m📝  Append Confirmation\x1b[0m");
+        println!("────────────────────────────────────────────────────");
+        println!("  File:    {}", path);
+        println!("  Adding:  {} bytes", content.len());
+        println!("  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─");
+        for line in preview.lines().take(20) {
+            println!("  {}", line);
+        }
+        println!("────────────────────────────────────────────────────");
+        if !confirm_action("file_ops/append", path) {
+            anyhow::bail!("Append to '{}' denied by user.", path);
+        }
+        // -- end confirmation --
 
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()

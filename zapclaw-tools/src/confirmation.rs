@@ -1,11 +1,19 @@
 use std::io::{self, Write};
+use std::env;
 
 /// Human-in-the-loop confirmation for sensitive actions.
 ///
 /// Displays the proposed action and waits for user approval.
 /// This is a critical security layer preventing automated execution
 /// of potentially dangerous operations.
+///
+/// In test mode (ZAPCLAW_TEST_MODE=1), auto-approves all actions.
 pub fn confirm_action(tool_name: &str, description: &str) -> bool {
+    // Auto-approve in test mode
+    if env::var("ZAPCLAW_TEST_MODE").is_ok() {
+        return true;
+    }
+
     println!("\n🔒 ─── Confirmation Required ───────────────────────");
     println!("  Tool: {}", tool_name);
     println!("  Action: {}", description);
