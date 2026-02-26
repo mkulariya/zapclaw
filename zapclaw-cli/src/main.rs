@@ -13,6 +13,7 @@ use zapclaw_tools::browser_tool::BrowserTool;
 use zapclaw_tools::cron_tool::{check_due_jobs, CronTool};
 use zapclaw_tools::edit_tool::EditTool;
 use zapclaw_tools::exec_tool::ExecTool;
+use zapclaw_tools::android_tool::AndroidTool;
 use zapclaw_tools::file_tool::FileTool;
 use zapclaw_tools::find_tool::FindTool;
 use zapclaw_tools::grep_tool::GrepTool;
@@ -105,6 +106,10 @@ struct Cli {
     /// Enable Telegram bot integration (requires ZAPCLAW_TELEGRAM_TOKEN and ZAPCLAW_TELEGRAM_ALLOWED_IDS env vars)
     #[arg(long = "enable-telegram", default_value = "false")]
     enable_telegram: bool,
+
+    /// Enable Android device control via ADB
+    #[arg(long = "enable-android", default_value = "false")]
+    enable_android: bool,
 
     /// Inbound server port
     #[arg(long)]
@@ -841,6 +846,19 @@ async fn main() -> Result<()> {
     };
     tools.register(Arc::new(search_tool));
 
+    // Android device control (optional)
+    if cli.enable_android {
+        match AndroidTool::new(&workspace) {
+            Ok(android_tool) => {
+                tools.register(Arc::new(android_tool));
+                println!("  Android:   Enabled (ADB device control)");
+            }
+            Err(e) => {
+                eprintln!("  WARNING: Failed to initialize Android tool: {}", e);
+                eprintln!("            Android control will not be available.");
+            }
+        }
+    }
 
     let sandbox_active = sandbox_state == zapclaw_core::sandbox::SandboxState::Active;
 

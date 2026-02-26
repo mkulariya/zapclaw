@@ -1,3 +1,4 @@
+pub mod android_tool;
 pub mod browser_tool;
 pub mod confirmation;
 pub mod cron_tool;
