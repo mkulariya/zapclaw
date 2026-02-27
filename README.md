@@ -313,10 +313,6 @@ EOF
 
 # Secure the file
 chmod 600 ~/.zapclaw/.env
-
-# Add to shell profile to auto-load
-echo 'source ~/.zapclaw/.env' >> ~/.bashrc  # or ~/.zshrc
-source ~/.bashrc
 ```
 
 **Mobile/Termux (Android):**
