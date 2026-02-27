@@ -41,7 +41,7 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
 
    # Clone ZapClaw
    cd ~
-   git clone https://github.com/your-org/zapclaw.git
+   git clone https://github.com/mkulariya/zapclaw.git
    cd zapclaw
 
    # Run bootstrap script (installs ZapClaw - takes 5-10 minutes)
