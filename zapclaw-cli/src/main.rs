@@ -495,7 +495,7 @@ async fn self_update() -> Result<()> {
         .build()?;
 
     let resp = client
-        .get("https://api.github.com/repos/zapclaw/zapclaw/releases/latest")
+        .get("https://api.github.com/repos/mkulariya/zapclaw/releases/latest")
         .send()
         .await
         .context("Failed to check for updates")?;
@@ -503,7 +503,7 @@ async fn self_update() -> Result<()> {
     if !resp.status().is_success() {
         println!("⚠️  Could not check for updates (HTTP {})", resp.status());
         println!("You can update manually:");
-        println!("  cd {} && git pull && cargo build --release", env!("CARGO_MANIFEST_DIR"));
+        println!("  git pull && cargo install --path zapclaw-cli --force");
         return Ok(());
     }
 
@@ -520,7 +520,7 @@ async fn self_update() -> Result<()> {
     println!("Updating via git...");
 
     let output = std::process::Command::new("sh")
-        .args(["-c", "cd $(git rev-parse --show-toplevel 2>/dev/null || echo .) && git pull origin main && cargo build --release"])
+        .args(["-c", "cd $(git rev-parse --show-toplevel 2>/dev/null || echo .) && git pull origin main && cargo install --path zapclaw-cli --force"])
         .output()
         .context("Failed to run update command")?;
 
@@ -529,7 +529,7 @@ async fn self_update() -> Result<()> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         println!("⚠️  Update had issues:\n{}", stderr);
-        println!("Try manually: git pull && cargo build --release");
+        println!("Try manually: git pull && cargo install --path zapclaw-cli --force");
     }
 
     Ok(())
