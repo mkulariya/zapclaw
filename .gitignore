@@ -13,9 +13,9 @@
 .DS_Store
 Thumbs.db
 
-# Runtime directories
-pincer_workspace/
-safepincer_workspace/
+# Runtime directories — workspace is always local, never committed
+zapclaw_workspace/
+zapclaw-core/zapclaw_workspace/
 certs/
 
 # Environment
