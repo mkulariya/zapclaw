@@ -21,6 +21,7 @@ certs/
 # Environment
 .env
 .env.local
+!.env.example
 
 # Memory database
 *.db

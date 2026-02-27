@@ -573,8 +573,40 @@ fn extract_final_response(response: &str) -> String {
     response.to_string()
 }
 
+/// Load .env files before anything else.
+///
+/// Precedence (highest to lowest):
+///   shell env vars  >  ./.env  >  ~/.zapclaw/.env
+///
+/// Neither file overrides variables already set in the shell environment.
+/// Both files are optional — missing files are silently ignored.
+fn load_dotenv() {
+    // ./.env — project-specific, takes priority over global
+    if std::path::Path::new(".env").exists() {
+        if let Err(e) = dotenvy::from_filename(".env") {
+            eprintln!("Warning: Failed to parse .env: {}", e);
+        }
+    }
+
+    // ~/.zapclaw/.env — global fallback
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    if let Some(home) = home {
+        let path = std::path::PathBuf::from(home).join(".zapclaw").join(".env");
+        if path.exists() {
+            if let Err(e) = dotenvy::from_path(&path) {
+                eprintln!("Warning: Failed to parse {}: {}", path.display(), e);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env files first — before env_logger (RUST_LOG) and Cli::parse() (env = "...")
+    load_dotenv();
+
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)

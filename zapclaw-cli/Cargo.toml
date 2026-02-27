@@ -25,3 +25,4 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 url = "2"
 base64 = { workspace = true }
+dotenvy = "0.15"
