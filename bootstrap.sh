@@ -182,52 +182,27 @@ install_ollama() {
         return 0
     fi
 
-    # Termux special case - build from source
+    # Termux: Ollama is in the official Termux package repo since April 2025.
+    # Use pkg install — no build-from-source needed.
     if is_termux; then
-        log_info "Termux detected: Building Ollama from source..."
-        
-        # Install dependencies for building Ollama
-        log_info "Installing build dependencies (golang, cmake, git)..."
-        pkg install -y golang cmake git curl || {
-            log_error "Failed to install Termux dependencies"
-            return 1
-        }
+        log_info "Termux detected: Installing Ollama via pkg..."
+        pkg update -y 2>/dev/null || true
 
-        # Clone and build Ollama
-        local ollama_build_dir="$(mktemp -d -t ollama-build-XXXXXX)"
-        log_info "Cloning Ollama repository..."
-        git clone --depth 1 https://github.com/ollama/ollama.git "$ollama_build_dir" || {
-            log_error "Failed to clone Ollama repository"
-            return 1
-        }
+        if pkg install -y ollama; then
+            log_success "Ollama installed via pkg"
+            return 0
+        fi
 
-        log_info "Building Ollama (this may take a while)..."
-        cd "$ollama_build_dir"
-        
-        # Generate Go files and build
-        go generate ./... || {
-            log_error "Failed to generate Go files"
-            return 1
-        }
-        
-        go build . || {
-            log_error "Failed to build Ollama"
-            return 1
-        }
+        # Fallback: Termux User Repository (TUR) carries a newer build if base repo is stale
+        log_warn "pkg install ollama failed. Trying Termux User Repository (TUR)..."
+        if pkg install -y tur-repo && pkg update -y && pkg install -y ollama; then
+            log_success "Ollama installed via TUR repo"
+            return 0
+        fi
 
-        # Install to Termux bin directory
-        log_info "Installing Ollama to ~/../usr/bin..."
-        cp ollama ~/../usr/bin/ || {
-            log_error "Failed to copy Ollama binary"
-            return 1
-        }
-
-        # Cleanup
-        cd - >/dev/null
-        rm -rf "$ollama_build_dir"
-
-        log_success "Ollama built and installed successfully"
-        return 0
+        log_error "Could not install Ollama on Termux via pkg or TUR repo."
+        log_error "Try manually: pkg install tur-repo && pkg update && pkg install ollama"
+        return 1
     fi
 
     # Standard Linux/macOS installation
@@ -289,7 +264,7 @@ pull_ollama_embedding_model() {
 # Build and install ZapClaw
 install_zapclaw() {
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    
+
     log_info "Building ZapClaw ${ZAPCLAW_VERSION}..."
     cd "$script_dir"
 
@@ -306,6 +281,16 @@ install_zapclaw() {
     else
         log_error "Failed to install ZapClaw"
         return 1
+    fi
+
+    # On Termux, pkg-installed cargo does not auto-add ~/.cargo/bin to PATH.
+    # Add it now for the current session and persist it to ~/.bashrc.
+    if is_termux; then
+        export PATH="$HOME/.cargo/bin:$PATH"
+        if ! grep -q 'cargo/bin' "${HOME}/.bashrc" 2>/dev/null; then
+            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$HOME/.bashrc"
+            log_info "Added ~/.cargo/bin to PATH in ~/.bashrc"
+        fi
     fi
 }
 
@@ -460,17 +445,17 @@ main() {
     echo ""
 
     # Step 1: Install Rust
-    log_info "[Step 1/5] Installing Rust toolchain..."
+    log_info "[Step 1/6] Installing Rust toolchain..."
     install_rust || exit 1
     echo ""
 
     # Step 2: Install system dependencies
-    log_info "[Step 2/5] Installing system dependencies..."
+    log_info "[Step 2/6] Installing system dependencies..."
     install_system_deps
     echo ""
 
     # Step 3: Install sandbox tool (Bubblewrap on Linux; sandbox-exec is built-in on macOS)
-    log_info "[Step 3/5] Setting up sandbox tool..."
+    log_info "[Step 3/6] Setting up sandbox tool..."
     install_bubblewrap
     echo ""
 
