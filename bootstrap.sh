@@ -66,6 +66,19 @@ install_rust() {
         return 0
     fi
 
+    # Termux: rustup-init panics on Android (rustls-platform-verifier requires Android
+    # context initialization). Use pkg instead — Termux ships Rust natively.
+    if is_termux; then
+        log_info "Termux detected: Installing Rust via pkg (rustup not supported on Android)..."
+        if pkg install -y rust; then
+            log_success "Rust toolchain installed via pkg"
+            return 0
+        else
+            log_error "Failed to install Rust via pkg"
+            return 1
+        fi
+    fi
+
     log_info "Installing Rust toolchain..."
     if curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; then
         log_success "Rust toolchain installed"
@@ -227,6 +240,19 @@ install_ollama() {
     fi
 }
 
+# Wait for Ollama daemon to become responsive (up to 30s)
+wait_for_ollama() {
+    local retries=30
+    while [ $retries -gt 0 ]; do
+        if ollama list >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        retries=$((retries - 1))
+    done
+    return 1
+}
+
 # Pull Ollama embedding model (required for indexing)
 pull_ollama_embedding_model() {
     if ! command_exists ollama; then
@@ -236,12 +262,18 @@ pull_ollama_embedding_model() {
         return 0
     fi
 
-    # Start Ollama service in background for Termux
-    if is_termux; then
+    # Start Ollama daemon if it is not already running
+    if ! ollama list >/dev/null 2>&1; then
         log_info "Starting Ollama service in background..."
         ollama serve >/dev/null 2>&1 &
-        # Wait a bit for Ollama to start
-        sleep 3
+
+        log_info "Waiting for Ollama to become ready (up to 30s)..."
+        if ! wait_for_ollama; then
+            log_warn "Ollama service did not start in time. Skipping embedding model pull."
+            log_warn "Start Ollama manually ('ollama serve') and then run: ollama pull ${OLLAMA_EMBEDDING_MODEL}"
+            return 0
+        fi
+        log_success "Ollama service is running"
     fi
 
     log_info "Pulling embedding model: ${OLLAMA_EMBEDDING_MODEL}..."
@@ -443,7 +475,7 @@ main() {
     echo ""
 
     # Step 4: Install Ollama and pull embedding model
-    log_info "[Step 4/5] Installing Ollama and pulling embedding model..."
+    log_info "[Step 4/6] Installing Ollama and pulling embedding model..."
     install_ollama || exit 1
     pull_ollama_embedding_model || exit 1
     echo ""
