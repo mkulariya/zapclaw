@@ -603,6 +603,39 @@ impl MemoryDb {
                 .with_context(|| format!("Failed to create MEMORY.md: {}", memory_md.display()))?;
         }
 
+        // Auto-create docs/ with usage hint
+        let docs_dir = workspace.join("docs");
+        if !docs_dir.exists() {
+            std::fs::create_dir_all(&docs_dir)
+                .with_context(|| format!("Failed to create docs directory: {}", docs_dir.display()))?;
+            std::fs::write(
+                docs_dir.join("useme.md"),
+                "# docs/\n\nDrop reference documentation here — anything ZapClaw should know about your project.\n\nExamples:\n- API specs, data models, architecture docs\n- Third-party service docs you use frequently\n- Project-specific terminology or glossary\n- Any static reference material\n\nAll .md files here are indexed automatically. ZapClaw retrieves relevant sections during tasks.\n",
+            ).ok();
+        }
+
+        // Auto-create notes/ with usage hint
+        let notes_dir = workspace.join("notes");
+        if !notes_dir.exists() {
+            std::fs::create_dir_all(&notes_dir)
+                .with_context(|| format!("Failed to create notes directory: {}", notes_dir.display()))?;
+            std::fs::write(
+                notes_dir.join("useme.md"),
+                "# notes/\n\nDrop your personal notes and preferences here — context you want ZapClaw to remember.\n\nExamples:\n- How you like tasks done (\"always use TypeScript\", \"prefer short responses\")\n- Project conventions (\"use camelCase\", \"commit messages must include ticket ID\")\n- Running checklists or decisions\n- Meeting notes or context you want ZapClaw to recall\n\nAll .md files here are indexed automatically. ZapClaw retrieves relevant sections during tasks.\n",
+            ).ok();
+        }
+
+        // Auto-create .skills/ with usage hint
+        let skills_dir = workspace.join(".skills");
+        if !skills_dir.exists() {
+            std::fs::create_dir_all(&skills_dir)
+                .with_context(|| format!("Failed to create .skills directory: {}", skills_dir.display()))?;
+            std::fs::write(
+                skills_dir.join("useme.md"),
+                "# .skills/\n\nAdd custom skills here — reusable instruction sets ZapClaw follows for specific tasks.\n\nEach skill is a subdirectory containing a SKILL.md file:\n\n  .skills/\n  └── your-skill-name/\n      └── SKILL.md\n\nSKILL.md format:\n\n  ---\n  description: One-line description of what this skill does\n  ---\n\n  Step-by-step instructions ZapClaw follows when this skill applies.\n  Be specific — treat it like a runbook.\n\nExamples:\n- post-linkedin/SKILL.md — steps to compose and post on LinkedIn\n- daily-standup/SKILL.md — format and send a daily standup message\n- code-review/SKILL.md — checklist for reviewing a pull request\n\nZapClaw scans this folder on every run and injects matching skills into its context automatically.\n",
+            ).ok();
+        }
+
         // Open SQLite index database (matching OpenClaw's store.path)
         let db_path = workspace.join("memory.db");
         let conn = Connection::open(&db_path)

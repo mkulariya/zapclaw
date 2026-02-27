@@ -235,6 +235,16 @@ zapclaw --enable-android --no-sandbox --task "Take a screenshot"
 zapclaw --enable-android --no-sandbox --task "Open Instagram, search for 'cats', like the first 3 posts"
 ```
 
+## Android Automation Skill
+
+ZapClaw ships with a ready-made Android automation skill at `skills/android-automation/SKILL.md` in the repo. Copy it to your workspace to enable it:
+
+```bash
+cp -r skills/android-automation zapclaw_workspace/.skills/
+```
+
+ZapClaw picks it up automatically on the next run — no restart needed.
+
 ## Troubleshooting
 
 ### "adb: no permissions"

@@ -160,6 +160,42 @@ zapclaw/
     └── gen_certs.sh       # mTLS certificate generator
 ```
 
+## Workspace Context Folders
+
+ZapClaw auto-creates these folders in your workspace on first run:
+
+```
+zapclaw_workspace/
+├── MEMORY.md          ← top-level persistent memory (agent-managed)
+├── memory/            ← dated session notes (agent-managed, e.g. 2026-02-27.md)
+├── docs/              ← YOUR reference docs (you manage)
+│   └── useme.md       ← explains what to put here
+├── notes/             ← YOUR personal notes & preferences (you manage)
+│   └── useme.md       ← explains what to put here
+└── .skills/           ← YOUR custom skills (you manage)
+    └── useme.md       ← explains what to put here
+```
+
+**`docs/`** — Drop reference documentation here:
+- API specs, data models, architecture diagrams (as text/markdown)
+- Third-party service docs you reference frequently
+- Project-specific terminology or glossary
+
+**`notes/`** — Drop your personal context and preferences:
+- How you like things done ("always use TypeScript", "short responses only")
+- Project conventions ("camelCase", "ticket IDs in commits")
+- Running checklists, decisions, context you want recalled
+
+**`.skills/`** — Add custom skills — reusable instruction sets ZapClaw follows for specific tasks:
+```
+.skills/
+└── post-linkedin/
+    └── SKILL.md
+```
+Each `SKILL.md` has a one-line `description:` frontmatter and step-by-step instructions. ZapClaw scans this folder on every run and injects matching skills into its context automatically.
+
+All `.md` files in `docs/` and `notes/` are **automatically indexed** into ZapClaw's hybrid search (BM25 + vector embeddings) and retrieved during tasks when relevant.
+
 ## Security Model
 
 ### Defense in Depth
