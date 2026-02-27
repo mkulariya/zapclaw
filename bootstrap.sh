@@ -193,16 +193,51 @@ install_ollama() {
             return 0
         fi
 
-        # Fallback: Termux User Repository (TUR) carries a newer build if base repo is stale
-        log_warn "pkg install ollama failed. Trying Termux User Repository (TUR)..."
-        if pkg install -y tur-repo && pkg update -y && pkg install -y ollama; then
-            log_success "Ollama installed via TUR repo"
-            return 0
-        fi
+        # Fallback: build from source
+        log_warn "pkg/TUR install failed. Falling back to building Ollama from source (this will take a while)..."
+        log_info "Installing build dependencies (golang, cmake, git)..."
+        pkg install -y golang cmake git curl || {
+            log_error "Failed to install build dependencies"
+            return 1
+        }
 
-        log_error "Could not install Ollama on Termux via pkg or TUR repo."
-        log_error "Try manually: pkg install tur-repo && pkg update && pkg install ollama"
-        return 1
+        local ollama_build_dir
+        ollama_build_dir="$(mktemp -d -t ollama-build-XXXXXX)"
+        log_info "Cloning Ollama repository..."
+        git clone --depth 1 https://github.com/ollama/ollama.git "$ollama_build_dir" || {
+            log_error "Failed to clone Ollama repository"
+            return 1
+        }
+
+        log_info "Building Ollama from source (this may take a while)..."
+        cd "$ollama_build_dir"
+
+        go generate ./... || {
+            log_error "Failed to generate Go files"
+            cd - >/dev/null
+            rm -rf "$ollama_build_dir"
+            return 1
+        }
+
+        go build . || {
+            log_error "Failed to build Ollama"
+            cd - >/dev/null
+            rm -rf "$ollama_build_dir"
+            return 1
+        }
+
+        log_info "Installing Ollama binary to $PREFIX/bin..."
+        cp ollama "$PREFIX/bin/" || {
+            log_error "Failed to copy Ollama binary to $PREFIX/bin"
+            cd - >/dev/null
+            rm -rf "$ollama_build_dir"
+            return 1
+        }
+
+        cd - >/dev/null
+        rm -rf "$ollama_build_dir"
+        log_success "Ollama built and installed from source successfully"
+        return 0
     fi
 
     # Standard Linux/macOS installation
