@@ -636,6 +636,42 @@ impl MemoryDb {
             ).ok();
         }
 
+        // Auto-create SOUL.md with usage hint
+        let soul_path = workspace.join("SOUL.md");
+        if !soul_path.exists() {
+            std::fs::write(
+                &soul_path,
+                "# SOUL.md — Agent Persona\n\nDefine your agent's personality, tone, and communication style here.\nZapClaw reads this on every run and embodies the persona described.\n\nExamples:\n- \"You are a concise, no-nonsense engineer. Skip pleasantries. Use bullet points.\"\n- \"You are a patient tutor. Always explain your reasoning step by step.\"\n- \"You are a senior DevOps engineer. Prefer shell one-liners over long explanations.\"\n\nReplace this content with your own persona. Be as specific as you like.\n",
+            ).ok();
+        }
+
+        // Auto-create USER.md with usage hint
+        let user_path = workspace.join("USER.md");
+        if !user_path.exists() {
+            std::fs::write(
+                &user_path,
+                "# USER.md — About You\n\nDescribe yourself here so ZapClaw always knows who it's helping.\nThis is injected into every session — no need to re-introduce yourself.\n\nExamples:\n- Name & role: \"Mihir, founder building a Rust AI agent\"\n- Expertise: \"Expert in Rust and distributed systems, familiar with ML basics\"\n- Preferences: \"Direct answers, bullet points, skip the basics\"\n- Timezone: \"IST (UTC+5:30)\"\n- Languages: \"English primary, Hindi\"\n\nReplace this content with your own profile.\n",
+            ).ok();
+        }
+
+        // Auto-create AGENTS.md with usage hint
+        let agents_path = workspace.join("AGENTS.md");
+        if !agents_path.exists() {
+            std::fs::write(
+                &agents_path,
+                "# AGENTS.md — Workspace Instructions\n\nDefine workspace-specific rules and guidelines ZapClaw follows on every task.\nUse this for conventions, constraints, and behavioral rules specific to this workspace.\n\nExamples:\n- \"Always run cargo fmt and cargo clippy before considering code tasks done\"\n- \"Never modify files outside src/ without asking first\"\n- \"When writing commit messages, always include a ticket ID prefix\"\n- \"Prefer editing existing files over creating new ones\"\n\nReplace this content with your own workspace instructions.\n",
+            ).ok();
+        }
+
+        // Auto-create CONTEXT.md with usage hint
+        let context_path = workspace.join("CONTEXT.md");
+        if !context_path.exists() {
+            std::fs::write(
+                &context_path,
+                "# CONTEXT.md — Project Context\n\nDescribe your project here so ZapClaw always has background context.\nThis is injected into every session — no need to re-explain your setup each time.\n\nExamples:\n- Tech stack: \"Rust backend, React frontend, PostgreSQL, deployed on Fly.io\"\n- Conventions: \"All API routes use snake_case. No ORM — raw SQL only.\"\n- Goals: \"This is a fintech app. Prefer correctness over speed.\"\n- Team norms: \"PRs require two approvals. Tests are mandatory.\"\n\nReplace this content with your own project context.\n",
+            ).ok();
+        }
+
         // Open SQLite index database (matching OpenClaw's store.path)
         let db_path = workspace.join("memory.db");
         let conn = Connection::open(&db_path)

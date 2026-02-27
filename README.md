@@ -167,6 +167,10 @@ ZapClaw auto-creates these folders in your workspace on first run:
 ```
 zapclaw_workspace/
 ├── MEMORY.md          ← top-level persistent memory (agent-managed)
+├── SOUL.md            ← YOUR agent persona & tone (you manage)
+├── USER.md            ← YOUR profile & preferences (you manage)
+├── AGENTS.md          ← YOUR workspace rules & conventions (you manage)
+├── CONTEXT.md         ← YOUR project context (you manage)
 ├── memory/            ← dated session notes (agent-managed, e.g. 2026-02-27.md)
 ├── docs/              ← YOUR reference docs (you manage)
 │   └── useme.md       ← explains what to put here
@@ -175,6 +179,24 @@ zapclaw_workspace/
 └── .skills/           ← YOUR custom skills (you manage)
     └── useme.md       ← explains what to put here
 ```
+
+All of these are auto-created on first run with usage hints inside.
+
+**`SOUL.md`** — Define the agent's personality and tone:
+- "You are a concise, no-nonsense engineer. Skip pleasantries. Use bullet points."
+- "You are a patient tutor. Always explain your reasoning step by step."
+
+**`USER.md`** — Describe yourself so ZapClaw always knows who it's helping:
+- Name, role, expertise level, preferred response style, timezone
+- Write once, never re-introduce yourself again
+
+**`AGENTS.md`** — Workspace-specific rules and conventions ZapClaw follows on every task:
+- "Always run cargo fmt before finishing code tasks"
+- "Never modify files outside src/ without asking"
+
+**`CONTEXT.md`** — Describe your project so ZapClaw always has background context:
+- Tech stack, conventions, goals, team norms
+- Injected into every session — no need to re-explain your setup each time
 
 **`docs/`** — Drop reference documentation here:
 - API specs, data models, architecture diagrams (as text/markdown)

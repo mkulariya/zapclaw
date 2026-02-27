@@ -75,6 +75,10 @@ pub struct FileConfig {
 
     /// Telegram bot enabled (requires ZAPCLAW_TELEGRAM_TOKEN env var)
     pub telegram_enabled: Option<bool>,
+
+    /// Maximum characters per context file (SOUL.md, USER.md, AGENTS.md, CONTEXT.md)
+    /// before truncation. Default: 20_000 (matches OpenClaw default).
+    pub context_file_max_chars: Option<usize>,
 }
 
 impl Default for FileConfig {
@@ -102,6 +106,7 @@ impl Default for FileConfig {
             memory_allow_lexical_fallback: None,
             memory_cache_max_entries: None,
             telegram_enabled: None,
+            context_file_max_chars: None,
         }
     }
 }
@@ -184,6 +189,10 @@ pub struct Config {
 
     /// Telegram bot enabled (requires ZAPCLAW_TELEGRAM_TOKEN and ZAPCLAW_TELEGRAM_ALLOWED_IDS env vars)
     pub telegram_enabled: bool,
+
+    /// Maximum characters per context file (SOUL.md, USER.md, AGENTS.md, CONTEXT.md)
+    /// before truncation. Increase for large context files. Default: 20_000.
+    pub context_file_max_chars: usize,
 }
 
 impl Default for Config {
@@ -213,6 +222,7 @@ impl Default for Config {
             memory_allow_lexical_fallback: false,
             memory_cache_max_entries: 50_000,
             telegram_enabled: false,
+            context_file_max_chars: 20_000,
         }
     }
 }
@@ -548,6 +558,9 @@ impl Config {
                     }
                     if file_cfg.memory_cache_max_entries.is_some() {
                         merged.memory_cache_max_entries = file_cfg.memory_cache_max_entries;
+                    }
+                    if file_cfg.context_file_max_chars.is_some() {
+                        merged.context_file_max_chars = file_cfg.context_file_max_chars;
                     }
                 }
                 Err(e) => {
@@ -952,6 +965,12 @@ impl Config {
             }
         }
 
+        if let Ok(max) = std::env::var("ZAPCLAW_CONTEXT_FILE_MAX_CHARS") {
+            if let Ok(n) = max.parse::<usize>() {
+                config.context_file_max_chars = n;
+            }
+        }
+
         // Telegram enabled only if BOTH env vars are present
         config.telegram_enabled = std::env::var("ZAPCLAW_TELEGRAM_TOKEN").is_ok()
             && std::env::var("ZAPCLAW_TELEGRAM_ALLOWED_IDS").is_ok();
@@ -1036,6 +1055,9 @@ impl Config {
         }
         if let Some(max_entries) = file_cfg.memory_cache_max_entries {
             config.memory_cache_max_entries = max_entries;
+        }
+        if let Some(max_chars) = file_cfg.context_file_max_chars {
+            config.context_file_max_chars = max_chars;
         }
 
         // Apply env config (overrides file and defaults)
@@ -1192,6 +1214,7 @@ impl Config {
             "memory_require_embeddings": true,
             "memory_allow_lexical_fallback": false,
             "memory_cache_max_entries": 50000,
+            "context_file_max_chars": 20000,
             "_comment_memory": "Memory system settings for hybrid search (BM25 + vector embeddings)",
             "_comment_memory_setup": "Install Ollama and run: ollama pull nomic-embed-text:v1.5",
         });
@@ -1224,6 +1247,7 @@ impl Config {
             memory_allow_lexical_fallback: Some(self.memory_allow_lexical_fallback),
             memory_cache_max_entries: Some(self.memory_cache_max_entries),
             telegram_enabled: Some(self.telegram_enabled),
+            context_file_max_chars: Some(self.context_file_max_chars),
         };
 
         serde_json::to_string_pretty(&file_config)

@@ -286,14 +286,53 @@ IMPORTANT: If the file already exists, APPEND new content only and do not overwr
 "#.to_string()
 }
 
-/// Build context files section (SOUL.md, project context).
-fn build_context_section(workspace: &Path) -> String {
+/// Fraction of the char budget kept from the head of a context file.
+const CONTEXT_HEAD_RATIO: f64 = 0.7;
+/// Fraction of the char budget kept from the tail of a context file.
+const CONTEXT_TAIL_RATIO: f64 = 0.2;
+
+/// Truncate a context file to fit within the char budget.
+/// Keeps the head (70%) and tail (20%), inserts a marker in the middle.
+/// If the content fits, returns it unchanged.
+fn truncate_context_file(content: &str, filename: &str, max_chars: usize) -> String {
+    let trimmed = content.trim_end();
+    if trimmed.len() <= max_chars {
+        return trimmed.to_string();
+    }
+    let head_chars = (max_chars as f64 * CONTEXT_HEAD_RATIO) as usize;
+    let tail_chars = (max_chars as f64 * CONTEXT_TAIL_RATIO) as usize;
+    let head = &trimmed[..head_chars];
+    let tail = &trimmed[trimmed.len() - tail_chars..];
+    let marker = format!(
+        "\n[...truncated, read {} for full content...]\n\u{2026}(truncated {}: kept {}+{} chars of {})…\n",
+        filename, filename, head_chars, tail_chars, trimmed.len()
+    );
+    format!("{}{}{}", head, marker, tail)
+}
+
+/// Build context files section (MEMORY.md, SOUL.md, USER.md, AGENTS.md, CONTEXT.md).
+fn build_context_section(workspace: &Path, max_chars: usize) -> String {
     let mut sections = Vec::new();
 
-    // Check for SOUL.md
+    // Check for MEMORY.md — persistent memory (injected directly, same as OpenClaw)
+    let memory_md_path = workspace.join("MEMORY.md");
+    if memory_md_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&memory_md_path) {
+            if !content.trim().is_empty() {
+                let content = truncate_context_file(&content, "MEMORY.md", max_chars);
+                sections.push(format!(
+                    "## MEMORY.md (Persistent Memory)\nThis is your persistent memory from previous sessions. Use it to recall prior decisions, preferences, and context.\n\n{}\n",
+                    content
+                ));
+            }
+        }
+    }
+
+    // Check for SOUL.md — persona and tone
     let soul_path = workspace.join("SOUL.md");
     if soul_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&soul_path) {
+            let content = truncate_context_file(&content, "SOUL.md", max_chars);
             sections.push(format!(
                 "## SOUL.md (Persona)\nEmbody this persona and tone. Avoid stiff, generic replies.\n\n{}\n",
                 content
@@ -301,10 +340,35 @@ fn build_context_section(workspace: &Path) -> String {
         }
     }
 
-    // Check for CONTEXT.md
+    // Check for USER.md — who the user is
+    let user_path = workspace.join("USER.md");
+    if user_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&user_path) {
+            let content = truncate_context_file(&content, "USER.md", max_chars);
+            sections.push(format!(
+                "## USER.md (About the User)\nThis is who you are helping. Tailor responses to their role, expertise, and preferences.\n\n{}\n",
+                content
+            ));
+        }
+    }
+
+    // Check for AGENTS.md — workspace-specific behavioral instructions
+    let agents_path = workspace.join("AGENTS.md");
+    if agents_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&agents_path) {
+            let content = truncate_context_file(&content, "AGENTS.md", max_chars);
+            sections.push(format!(
+                "## AGENTS.md (Workspace Instructions)\nFollow these workspace-specific guidelines for every task.\n\n{}\n",
+                content
+            ));
+        }
+    }
+
+    // Check for CONTEXT.md — project context
     let context_path = workspace.join("CONTEXT.md");
     if context_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&context_path) {
+            let content = truncate_context_file(&content, "CONTEXT.md", max_chars);
             sections.push(format!(
                 "## CONTEXT.md (Project Context)\n\n{}\n",
                 content
@@ -1552,7 +1616,7 @@ impl Agent {
 
         let skills_section = build_skills_section(&self.workspace_dir);
         let memory_section = build_memory_section(true);
-        let context_section = build_context_section(&self.workspace_dir);
+        let context_section = build_context_section(&self.workspace_dir, self.config.context_file_max_chars);
         let runtime_line = self.runtime_info.to_line();
 
         let mut sections = Vec::new();
@@ -1739,7 +1803,7 @@ mod tests {
     #[test]
     fn test_context_section_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let section = build_context_section(tmp.path());
+        let section = build_context_section(tmp.path(), 20_000);
         assert!(section.is_empty());
     }
 
@@ -1748,7 +1812,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("SOUL.md"), "I am a pirate assistant.").unwrap();
 
-        let section = build_context_section(tmp.path());
+        let section = build_context_section(tmp.path(), 20_000);
         assert!(section.contains("pirate assistant"));
         assert!(section.contains("SOUL.md"));
     }
