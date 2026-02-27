@@ -1242,6 +1242,7 @@ mod tests {
             tool_timeout: None,
             enable_inbound: false,
             enable_telegram: false,
+            enable_android: false,
             inbound_port: None,
             inbound_bind: None,
             inbound_api_key: None,

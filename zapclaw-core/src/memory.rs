@@ -575,6 +575,10 @@ impl EmbeddingProvider {
         &self.model
     }
 
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub fn target_dims(&self) -> usize {
         self.target_dims
     }

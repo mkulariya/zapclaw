@@ -160,8 +160,14 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn setup_test_mode() {
+        // Set test mode to auto-approve confirmations
+        std::env::set_var("ZAPCLAW_TEST_MODE", "1");
+    }
+
     #[tokio::test]
     async fn test_edit_single_replacement() {
+        setup_test_mode();
         let tmp = tempdir().unwrap();
         let file = tmp.path().join("test.rs");
         std::fs::write(&file, "fn old_name() {}\nfn other() {}").unwrap();
@@ -182,6 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_not_found() {
+        setup_test_mode();
         let tmp = tempdir().unwrap();
         let file = tmp.path().join("test.rs");
         std::fs::write(&file, "fn main() {}").unwrap();
@@ -199,6 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_replace_all() {
+        setup_test_mode();
         let tmp = tempdir().unwrap();
         let file = tmp.path().join("test.txt");
         std::fs::write(&file, "foo bar foo baz foo").unwrap();

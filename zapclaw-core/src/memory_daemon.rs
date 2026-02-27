@@ -374,24 +374,65 @@ impl MemoryDaemon {
         // After all retries failed
         if require_embeddings {
             anyhow::bail!(
-                "Ollama embedding service unreachable after {} attempts (require_embeddings=true). \
-                 Ensure Ollama is running and model is pulled: ollama pull {}",
-                MAX_RETRIES,
+                "\n\n═══════════════════════════════════════════════════════════════\n\
+                  ⚠️  OLLAMA EMBEDDING SERVICE NOT RUNNING\n\
+                  ═══════════════════════════════════════════════════════════════\n\n\
+                  ZapClaw cannot reach Ollama at: {}\n\
+                  Required model: {}\n\n\
+                  👉 START OLLAMA WITH THIS COMMAND:\n\
+                      ollama serve &\n\n\
+                  Then verify it's running:\n\
+                      ollama ps\n\n\
+                  If the model is missing, pull it:\n\
+                      ollama pull {}\n\n\
+                  ⚠️  ZapClaw will exit now. Start Ollama and try again.\n\
+                  ═══════════════════════════════════════════════════════════════\n",
+                provider.base_url(),
+                provider.model(),
                 provider.model()
             );
         } else if allow_lexical_fallback {
             log::warn!(
-                "Ollama unreachable, continuing with lexical-only search (require_embeddings=false, allow_lexical_fallback=true)"
+                "\n\n═══════════════════════════════════════════════════════════════\n\
+                  ⚠️  OLLAMA EMBEDDING SERVICE NOT RUNNING (FALLBACK MODE)\n\
+                  ═══════════════════════════════════════════════════════════════\n\n\
+                  ZapClaw cannot reach Ollama at: {}\n\
+                  Required model: {}\n\n\
+                  ✅ Continuing with KEYWORD-ONLY search (embeddings disabled)\n\n\
+                  👉 TO ENABLE EMBEDDINGS, START OLLAMA:\n\
+                      ollama serve &\n\n\
+                  Then verify:\n\
+                      ollama ps\n\n\
+                  If the model is missing, pull it:\n\
+                      ollama pull {}\n\n\
+                  ═══════════════════════════════════════════════════════════════\n",
+                provider.base_url(),
+                provider.model(),
+                provider.model()
             );
             Ok(())
         } else {
             // Invalid config: require_embeddings=false but allow_lexical_fallback=false
             anyhow::bail!(
-                "Ollama embedding service unreachable after {} attempts. \
-                 Config has require_embeddings=false but allow_lexical_fallback=false, \
-                 which is invalid. Either: (1) set require_embeddings=true and ensure Ollama is running, \
-                 or (2) set allow_lexical_fallback=true to use keyword-only search.",
-                MAX_RETRIES
+                "\n\n═══════════════════════════════════════════════════════════════\n\
+                  ⚠️  INVALID CONFIGURATION: OLLAMA NOT RUNNING\n\
+                  ═══════════════════════════════════════════════════════════════\n\n\
+                  ZapClaw cannot reach Ollama at: {}\n\
+                  Required model: {}\n\n\
+                  Your config has:\n\
+                    - memory_require_embeddings = false (Ollama optional)\n\
+                    - memory_allow_lexical_fallback = false (no fallback allowed)\n\n\
+                  This combination is invalid. Fix your config (~/.zapclaw/zapclaw.json):\n\n\
+                  Option 1 - Require Ollama (recommended for full search):\n\
+                    \"memory_require_embeddings\": true,\n\
+                    \"memory_allow_lexical_fallback\": false\n\
+                    Then start Ollama: ollama serve &\n\n\
+                  Option 2 - Allow keyword-only fallback:\n\
+                    \"memory_require_embeddings\": false,\n\
+                    \"memory_allow_lexical_fallback\": true\n\n\
+                  ═══════════════════════════════════════════════════════════════\n",
+                provider.base_url(),
+                provider.model()
             );
         }
     }

@@ -82,6 +82,20 @@ That's it. Now `zapclaw` is available as a command from anywhere. It automatical
 
 ### Run
 
+**⚠️ IMPORTANT: Start Ollama first (for memory embeddings)**
+
+ZapClaw requires Ollama to be running for memory search and embeddings. Start it before running ZapClaw:
+
+```bash
+# Start Ollama in background (runs on http://localhost:11434)
+ollama serve &
+
+# Verify Ollama is running
+ollama ps
+```
+
+**Now run ZapClaw:**
+
 ```bash
 # Interactive REPL (auto-creates home config on first run)
 zapclaw

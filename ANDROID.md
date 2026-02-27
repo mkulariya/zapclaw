@@ -92,6 +92,15 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
    source ~/.bashrc
    ```
 
+   **Step 3d: Start Ollama (required for memory embeddings)**
+   ```bash
+   # Start Ollama in background
+   ollama serve &
+
+   # Verify Ollama is running
+   ollama ps
+   ```
+
 4. **Install ADB (required for Android control)**:
    ```bash
    pkg install android-tools
@@ -109,6 +118,9 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
 
 5. **Run ZapClaw**:
    ```bash
+   # ⚠️ Make sure Ollama is running first!
+   ollama serve &
+
    # Interactive REPL mode
    zapclaw --enable-android --no-sandbox --no-confirm
 

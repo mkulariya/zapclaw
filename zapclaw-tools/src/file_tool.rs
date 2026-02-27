@@ -206,6 +206,9 @@ mod tests {
     use tempfile::tempdir;
 
     fn setup() -> (tempfile::TempDir, FileTool) {
+        // Set test mode to auto-approve confirmations
+        std::env::set_var("ZAPCLAW_TEST_MODE", "1");
+
         let tmp = tempdir().unwrap();
         let confiner = Arc::new(Confiner::new(tmp.path()).unwrap());
         let tool = FileTool::new(confiner);
