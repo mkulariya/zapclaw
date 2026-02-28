@@ -345,7 +345,9 @@ fn chunk_markdown(content: &str, tokens: usize, overlap: usize) -> Vec<MemoryChu
             let mut segs = Vec::new();
             let mut start = 0;
             while start < line.len() {
-                let end = (start + max_chars).min(line.len());
+                let raw_end = (start + max_chars).min(line.len());
+                let end = line.floor_char_boundary(raw_end);
+                if end <= start { break; } // safety: avoid infinite loop
                 segs.push(line[start..end].to_string());
                 start = end;
             }
@@ -537,14 +539,14 @@ impl EmbeddingProvider {
                     anyhow::bail!(
                         "Embedding API client error ({}): {}",
                         status,
-                        &body_text[..body_text.len().min(200)]
+                        &body_text[..body_text.floor_char_boundary(body_text.len().min(200))]
                     );
                 }
                 // 5xx server errors — retry
                 last_err = anyhow::anyhow!(
                     "Embedding API server error ({}): {}",
                     status,
-                    &body_text[..body_text.len().min(200)]
+                    &body_text[..body_text.floor_char_boundary(body_text.len().min(200))]
                 );
                 continue;
             }

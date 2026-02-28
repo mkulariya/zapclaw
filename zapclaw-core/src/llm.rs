@@ -318,7 +318,7 @@ fn parse_anthropic_response(body: &str) -> Result<LlmResponse> {
     let val: serde_json::Value = serde_json::from_str(body).with_context(|| {
         format!(
             "Failed to parse Anthropic response: {}",
-            &body[..body.len().min(300)]
+            &body[..body.floor_char_boundary(body.len().min(300))]
         )
     })?;
 
@@ -653,7 +653,7 @@ impl LlmClient for OpenAiCompatibleClient {
                     .with_context(|| {
                         format!(
                             "Failed to parse LLM API response: {}",
-                            &body[..body.len().min(200)]
+                            &body[..body.floor_char_boundary(body.len().min(200))]
                         )
                     })?;
 
@@ -788,7 +788,7 @@ impl LlmClient for OpenAiCompatibleClient {
                             log::debug!(
                                 "Anthropic SSE [{}]: {}",
                                 current_event,
-                                &data[..data.len().min(300)]
+                                &data[..data.floor_char_boundary(data.len().min(300))]
                             );
 
                             let val: serde_json::Value =
@@ -798,7 +798,7 @@ impl LlmClient for OpenAiCompatibleClient {
                                         log::warn!(
                                             "Failed to parse Anthropic SSE data ({}): {}",
                                             e,
-                                            &data[..data.len().min(200)]
+                                            &data[..data.floor_char_boundary(data.len().min(200))]
                                         );
                                         continue;
                                     }
@@ -1129,7 +1129,7 @@ impl LlmClient for OpenAiCompatibleClient {
                             break;
                         }
 
-                        log::debug!("SSE raw: {}", &data[..data.len().min(500)]);
+                        log::debug!("SSE raw: {}", &data[..data.floor_char_boundary(data.len().min(500))]);
 
                         // Parse SSE delta
                         #[derive(Deserialize)]
@@ -1164,7 +1164,7 @@ impl LlmClient for OpenAiCompatibleClient {
                                 log::warn!(
                                     "Failed to parse SSE chunk ({}): {}",
                                     parse_err,
-                                    &data[..data.len().min(200)]
+                                    &data[..data.floor_char_boundary(data.len().min(200))]
                                 );
                             }
                             Ok(delta) => {

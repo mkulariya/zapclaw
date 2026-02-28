@@ -1239,7 +1239,7 @@ impl Agent {
     fn format_messages_for_summary(messages: &[ChatMessage]) -> String {
         messages
             .iter()
-            .map(|m| format!("{}: {}", m.role, &m.content[..m.content.len().min(1_000)]))
+            .map(|m| format!("{}: {}", m.role, &m.content[..m.content.floor_char_boundary(m.content.len().min(1_000))]))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1292,7 +1292,7 @@ impl Agent {
                     log::warn!("Chunk summarization failed ({}), using partial fallback", e);
                     let partial = c
                         .iter()
-                        .map(|m| format!("{}: {}", m.role, &m.content[..m.content.len().min(300)]))
+                        .map(|m| format!("{}: {}", m.role, &m.content[..m.content.floor_char_boundary(m.content.len().min(300))]))
                         .collect::<Vec<_>>()
                         .join("\n");
                     summaries.push(partial);
@@ -1488,7 +1488,7 @@ impl Agent {
 
         let conversation_text: String = recent
             .iter()
-            .map(|m| format!("{}: {}", m.role, &m.content[..m.content.len().min(300)]))
+            .map(|m| format!("{}: {}", m.role, &m.content[..m.content.floor_char_boundary(m.content.len().min(300))]))
             .collect::<Vec<_>>()
             .join("\n");
 
