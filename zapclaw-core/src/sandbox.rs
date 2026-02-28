@@ -503,8 +503,8 @@ fn fail_closed_error() -> anyhow::Error {
     );
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     return anyhow!(
-        "Sandboxing is not supported on this platform.\n\
-        Use --no-sandbox to disable sandbox enforcement (NOT recommended)."
+        "Sandboxing (bubblewrap) is not available on this platform.\n\
+        Run with --no-sandbox to start ZapClaw without sandbox isolation."
     );
 }
 

@@ -723,13 +723,15 @@ impl Agent {
                 self.memory.log_action(
                     &format!("tool:{}", tool_call.function.name),
                     Some(&tool_call.function.arguments),
-                    Some(&tool_result[..tool_result.len().min(500)]),
+                    Some(&tool_result),
                 )?;
             }
         }
 
         // Log final response
-        self.memory.log_action("task_complete", None, Some(&final_response[..final_response.len().min(500)]))?;
+        if !final_response.is_empty() {
+            self.memory.log_action("task_complete", None, Some(&final_response))?;
+        }
 
         Ok(final_response)
     }
@@ -1007,7 +1009,7 @@ impl Agent {
 
         // Store final response
         if !final_response.is_empty() {
-            self.memory.log_action("task_complete", Some(&final_response), None)?;
+            self.memory.log_action("task_complete", None, Some(&final_response))?;
         }
 
         // Signal end of the entire agent turn — one Done per run_stream call,
