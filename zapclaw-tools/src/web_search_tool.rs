@@ -100,14 +100,47 @@ impl WebSearchTool {
     }
 
     async fn search_duckduckgo(&self, query: &str, num_results: usize) -> Result<String> {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent(ua)
             .build()?;
 
-        let resp = client
-            .get("https://html.duckduckgo.com/html/")
+        // Step 1: Fetch DDG homepage to extract the VQD (Validation Query Digest) token.
+        // DDG requires this token to serve results — without it, bot-detection triggers a CAPTCHA.
+        // This is the standard approach used by duckduckgo-search / LangChain.
+        let vqd_resp = client
+            .get("https://duckduckgo.com/")
             .query(&[("q", query)])
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await
+            .context("DuckDuckGo VQD fetch failed")?
+            .text()
+            .await?;
+
+        // Extract vqd=<token> from the HTML
+        let vqd = vqd_resp
+            .split("vqd=")
+            .nth(1)
+            .and_then(|s| {
+                // value may be quoted with ' or " or unquoted
+                let s = s.trim_start_matches(['\'', '"']);
+                s.split(|c: char| c == '\'' || c == '"' || c == '&' || c.is_whitespace()).next()
+            })
+            .unwrap_or("")
+            .to_string();
+
+        if vqd.is_empty() {
+            anyhow::bail!("DuckDuckGo VQD token not found — bot detection may have triggered");
+        }
+
+        // Step 2: POST search with VQD token (mimics browser form submit)
+        let resp = client
+            .post("https://html.duckduckgo.com/html/")
+            .header("Referer", "https://duckduckgo.com/")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .form(&[("q", query), ("b", ""), ("kl", "wt-wt"), ("vqd", &vqd)])
             .send()
             .await
             .context("DuckDuckGo search request failed")?;
@@ -223,7 +256,15 @@ impl Tool for WebSearchTool {
         let num_results = args.num_results.unwrap_or(5).min(self.max_results);
 
         match &self.search_engine {
-            SearchEngine::Brave => self.search_brave(&args.query, num_results).await,
+            SearchEngine::Brave => {
+                match self.search_brave(&args.query, num_results).await {
+                    Ok(result) => Ok(result),
+                    Err(e) => {
+                        log::warn!("Brave search failed ({}), falling back to DuckDuckGo", e);
+                        self.search_duckduckgo(&args.query, num_results).await
+                    }
+                }
+            }
             SearchEngine::DuckDuckGo => self.search_duckduckgo(&args.query, num_results).await,
             SearchEngine::SearXNG { base_url } => {
                 let url = base_url.clone();

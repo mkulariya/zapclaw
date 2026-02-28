@@ -828,19 +828,79 @@ async fn main() -> Result<()> {
             path
         }
     };
+    // Box-drawing constants. W = inner width (visible chars between the │ borders).
+    // The widest fixed line is the model row: 14 + 34 (padded model) + 18 = 66.
+    const W: usize = 68;
+    // Helper: pad a string of known visible length to fill the box row.
+    let pad = |vis: usize| " ".repeat(W.saturating_sub(vis));
+    // Helper: print a plain-text label+value row, wrapping the value onto
+    // continuation lines (indented to the value column) if it overflows.
+    let print_row = |label: &str, value: &str| {
+        let label_len = label.chars().count();
+        let available = W.saturating_sub(label_len);
+        let chars: Vec<char> = value.chars().collect();
+        if chars.len() <= available {
+            let vis = label_len + chars.len();
+            println!("│{}{}{}│", label, value, " ".repeat(W.saturating_sub(vis)));
+        } else {
+            let indent = " ".repeat(label_len);
+            let mut pos = 0usize;
+            let mut first = true;
+            while pos < chars.len() {
+                let end = (pos + available).min(chars.len());
+                let chunk: String = chars[pos..end].iter().collect();
+                let vis = label_len + (end - pos);
+                if first {
+                    println!("│{}{}{}│", label, chunk, " ".repeat(W.saturating_sub(vis)));
+                    first = false;
+                } else {
+                    println!("│{}{}{}│", indent, chunk, " ".repeat(W.saturating_sub(vis)));
+                }
+                pos = end;
+            }
+        }
+    };
+
     println!();
-    println!("  >_ \x1b[1mZapClaw\x1b[0m  \x1b[2m(v{})\x1b[0m", env!("CARGO_PKG_VERSION"));
-    println!();
-    println!("  model:      {:<34}\x1b[2m/help for commands\x1b[0m", config.model_name);
-    println!("  directory:  {}", dir_display);
+    println!("╭{}╮", "─".repeat(W));
+    println!("│{}│", " ".repeat(W));
+
+    // Header line — visible: "  >_ ZapClaw  (vX.Y.Z)"
+    let ver = env!("CARGO_PKG_VERSION");
+    let hdr_vis = format!("  >_ ZapClaw  (v{})", ver).len();
+    println!("│  \x1b[1m>_ ZapClaw\x1b[0m  \x1b[2m(v{})\x1b[0m{}│", ver, pad(hdr_vis));
+
+    println!("│{}│", " ".repeat(W));
+
+    // Model row — visible: "  model:      <34-padded-model>/help for commands"
+    let model_row_vis = format!("  model:      {:<34}/help for commands", config.model_name).len();
+    println!("│  model:      {:<34}\x1b[2m/help for commands\x1b[0m{}│", config.model_name, pad(model_row_vis));
+
+    // Directory row (wraps if path is long)
+    print_row("  directory:    ", &dir_display);
+
+    // Confirmation row
+    let confirm_str = if cli.no_confirm { "Allow" } else if cli.enable_inbound { "Deny" } else { "Ask" };
+    print_row("  confirmation: ", confirm_str);
+
+    // Thinking effort row (only if set)
+    if let Some(ref effort) = config.thinking_effort {
+        print_row("  thinking:     ", effort);
+    }
+
     // Security warnings — only shown when protections are disabled
     if sandbox_state == zapclaw_core::sandbox::SandboxState::Disabled {
-        println!();
-        println!("  \x1b[1;33m⚠  sandbox disabled (--no-sandbox)\x1b[0m");
+        println!("│{}│", " ".repeat(W));
+        // ⚠ is 1 display column; visible: "  ⚠  sandbox disabled (--no-sandbox)" = 37
+        println!("│  \x1b[1;33m⚠  sandbox disabled (--no-sandbox)\x1b[0m{}│", pad(37));
     }
     if !config.enable_egress_guard {
-        println!("  \x1b[1;33m⚠  egress guard disabled (UNSAFE)\x1b[0m");
+        // visible: "  ⚠  egress guard disabled (UNSAFE)" = 36
+        println!("│  \x1b[1;33m⚠  egress guard disabled (UNSAFE)\x1b[0m{}│", pad(36));
     }
+
+    println!("│{}│", " ".repeat(W));
+    println!("╰{}╯", "─".repeat(W));
     println!();
 
     // Initialize components
