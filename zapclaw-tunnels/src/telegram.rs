@@ -24,6 +24,7 @@ struct TelegramResponse<T> {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct Update {
     update_id: i32,
     message: Option<Message>,
@@ -31,6 +32,7 @@ struct Update {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct Message {
     message_id: i32,
     from: User,
@@ -47,6 +49,7 @@ struct User {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct Chat {
     id: i64,
     #[serde(rename = "type")]

@@ -100,7 +100,9 @@ pub struct MemoryDaemon {
     /// this flag is set so callers fall back to lexical search consistently.
     reindexing: Arc<AtomicBool>,
     /// Notification for sync coalescing — multiple rapid file changes
-    /// trigger at most one extra sync (not N).
+    /// trigger at most one extra sync (not N). Held here to keep the Arc
+    /// alive alongside the background watcher task.
+    #[allow(dead_code)]
     sync_notify: Arc<tokio::sync::Notify>,
 }
 
@@ -249,7 +251,7 @@ impl MemoryDaemon {
         // Triggers sync_notify when MEMORY.md or memory/*.md changes.
         let watch_workspace = workspace.to_path_buf();
         let sync_notify_watcher = Arc::clone(&sync_notify);
-        tokio::task::spawn_blocking(move || {
+        std::thread::spawn(move || {
             Self::run_fs_watcher(watch_workspace, sync_notify_watcher);
         });
 
@@ -354,7 +356,7 @@ impl MemoryDaemon {
                 provider.embed_query("test"),
             ).await {
                 Ok(Ok(_)) => {
-                    log::info!("Ollama embedding service verified (attempt {})", attempt);
+                    log::debug!("Ollama embedding service verified (attempt {})", attempt);
                     return Ok(());
                 }
                 Ok(Err(e)) => {
@@ -474,7 +476,7 @@ impl MemoryDaemon {
         match memory.embed_all_chunks(&provider).await {
             Ok(embedded) => {
                 let elapsed = start.elapsed().as_secs_f64();
-                log::info!("Initial sync completed in {:.2}s ({} chunks embedded)", elapsed, embedded);
+                log::debug!("Initial sync completed in {:.2}s ({} chunks embedded)", elapsed, embedded);
             }
             Err(e) => {
                 log::error!("Initial embed failed: {}", e);
@@ -541,7 +543,7 @@ impl MemoryDaemon {
         provider: &crate::memory::EmbeddingProvider,
         reindexing: &Arc<AtomicBool>,
     ) -> Result<ReindexResult> {
-        log::info!("Starting crash-safe forced reindex...");
+        log::debug!("Starting crash-safe forced reindex...");
         let start = std::time::Instant::now();
 
         // Phase 1: Sync files.
@@ -591,7 +593,7 @@ impl MemoryDaemon {
 
         let duration = start.elapsed().as_secs_f64();
 
-        log::info!(
+        log::debug!(
             "Crash-safe reindex complete: {} files, {} chunks in {:.2}s",
             files_reindexed,
             chunks_embedded,
@@ -724,7 +726,7 @@ impl MemoryDaemon {
                     provider.embed_query("test"),
                 ).await {
                     Ok(Ok(_)) => {
-                        log::info!("Ollama is reachable, enabling hybrid search");
+                        log::debug!("Ollama is reachable, enabling hybrid search");
                         true
                     },
                     Ok(Err(e)) => {
