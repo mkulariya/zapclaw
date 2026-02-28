@@ -499,7 +499,7 @@ impl Agent {
             .sanitize(task)
             .context("Input validation failed")?;
 
-        log::info!("🦞 Starting task: {}", &sanitized_task[..sanitized_task.len().min(100)]);
+        log::debug!("🦞 Starting task: {}", &sanitized_task[..sanitized_task.floor_char_boundary(100)]);
 
         // Session persistence: ensure session exists
         if let Some(ref store) = self.session_store {
@@ -639,7 +639,7 @@ impl Agent {
             if let Some(ref content) = response.content {
                 if !content.is_empty() {
                     final_response = content.clone();
-                    log::debug!("💬 LLM response: {}", &content[..content.len().min(200)]);
+                    log::debug!("💬 LLM response: {}", &content[..content.floor_char_boundary(200)]);
                 }
             }
 
@@ -694,7 +694,7 @@ impl Agent {
                 log::debug!(
                     "🔧 Tool '{}' result: {}",
                     tool_call.function.name,
-                    &tool_result[..tool_result.len().min(200)]
+                    &tool_result[..tool_result.floor_char_boundary(200)]
                 );
 
                 // Track recent tool outputs for taint detection (max 5 items)
@@ -753,7 +753,7 @@ impl Agent {
             .sanitize(task)
             .context("Input validation failed")?;
 
-        log::debug!("🦞 Starting task (streaming): {}", &sanitized_task[..sanitized_task.len().min(100)]);
+        log::debug!("🦞 Starting task (streaming): {}", &sanitized_task[..sanitized_task.floor_char_boundary(100)]);
 
         // Session persistence: ensure session exists
         if let Some(ref store) = self.session_store {
@@ -902,7 +902,7 @@ impl Agent {
             if let Some(ref content) = response.content {
                 if !content.is_empty() {
                     final_response = content.clone();
-                    log::debug!("💬 LLM response: {}", &content[..content.len().min(200)]);
+                    log::debug!("💬 LLM response: {}", &content[..content.floor_char_boundary(200)]);
                 }
             }
 
@@ -985,7 +985,7 @@ impl Agent {
                 let _ = tx.send(StreamChunk::ToolEnd {
                     name: tool_call.function.name.clone(),
                     tool_call_id: tool_call.id.clone(),
-                    result: tool_result[..tool_result.len().min(200)].to_string(),
+                    result: tool_result[..tool_result.floor_char_boundary(200)].to_string(),
                     is_error,
                 }).await;
 
@@ -1005,13 +1005,21 @@ impl Agent {
             }
         }
 
-        // Emit lifecycle end
-        let _ = tx.send(StreamChunk::LifecycleEvent { phase: "end".to_string() }).await;
-
         // Store final response
         if !final_response.is_empty() {
             self.memory.log_action("task_complete", Some(&final_response), None)?;
         }
+
+        // Signal end of the entire agent turn — one Done per run_stream call,
+        // after all LLM calls and tool executions are complete. The print task
+        // in the CLI breaks on this signal to flush its line buffer and exit.
+        let _ = tx.send(StreamChunk::Done(crate::llm::LlmResponse {
+            content: if final_response.is_empty() { None } else { Some(final_response.clone()) },
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+            anthropic_blocks: vec![],
+        })).await;
 
         Ok(final_response)
     }
@@ -1111,9 +1119,9 @@ impl Agent {
                         }
 
                         if egress_guard_confirmed {
-                            log::info!("✅ Medium-risk egress approved for '{}' (skips normal confirmation)", tool_name);
+                            log::debug!("✅ Medium-risk egress approved for '{}' (skips normal confirmation)", tool_name);
                         } else {
-                            log::info!("✅ Medium-risk egress approved for '{}'", tool_name);
+                            log::debug!("✅ Medium-risk egress approved for '{}'", tool_name);
                         }
                     }
                     EgressRiskLevel::Low => {
@@ -1137,7 +1145,7 @@ impl Agent {
                 args.clone()
             };
 
-            log::info!(
+            log::debug!(
                 "⚠️  Tool '{}' requires confirmation. Args: {}",
                 tool_name,
                 preview
@@ -1199,7 +1207,7 @@ impl Agent {
                 return Err(anyhow::anyhow!(error_msg));
             }
 
-            log::info!("✅ Tool '{}' approved", tool_name);
+            log::debug!("✅ Tool '{}' approved", tool_name);
         }
 
         // Execute with timeout
@@ -1519,7 +1527,7 @@ impl Agent {
                     let _ = file.write_all(header.as_bytes());
                     let _ = file.write_all(insights.as_bytes());
                     let _ = file.write_all(b"\n");
-                    log::info!("Session insights flushed to memory/{}.md", date);
+                    log::debug!("Session insights flushed to memory/{}.md", date);
                 }
             }
             Err(e) => {

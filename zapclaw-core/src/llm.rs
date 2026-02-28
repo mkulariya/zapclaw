@@ -184,7 +184,9 @@ pub trait LlmClient: Send + Sync {
         if let Some(ref content) = response.content {
             let _ = tx.send(StreamChunk::TextDelta(content.clone())).await;
         }
-        let _ = tx.send(StreamChunk::Done(response.clone())).await;
+        // Signal this LLM call is complete — NOT the end of the agent turn.
+        // The final Done is sent once by run_stream after the full agent loop completes.
+        let _ = tx.send(StreamChunk::LifecycleEvent { phase: "llm_done".to_string() }).await;
         Ok(response)
     }
 
@@ -1028,18 +1030,27 @@ impl LlmClient for OpenAiCompatibleClient {
                     Vec::new()
                 };
 
+                // Filter out padding entries (empty name) inserted during index-based
+                // accumulation. These arise when a tool_use block has a non-zero index
+                // (e.g. idx=1 because idx=0 was a thinking block), causing the vec to
+                // be padded with blank ToolCall values to maintain positional alignment.
+                let tool_calls: Vec<ToolCall> = tool_calls_acc
+                    .into_iter()
+                    .filter(|tc| !tc.function.name.is_empty())
+                    .collect();
+
                 let response = LlmResponse {
                     content: if full_content.is_empty() {
                         None
                     } else {
                         Some(full_content)
                     },
-                    tool_calls: tool_calls_acc,
+                    tool_calls,
                     finish_reason,
                     usage,
                     anthropic_blocks,
                 };
-                let _ = tx.send(StreamChunk::Done(response.clone())).await;
+                let _ = tx.send(StreamChunk::LifecycleEvent { phase: "llm_done".to_string() }).await;
                 Ok(response)
             }
 
@@ -1236,7 +1247,7 @@ impl LlmClient for OpenAiCompatibleClient {
                     usage,
                     anthropic_blocks: vec![],
                 };
-                let _ = tx.send(StreamChunk::Done(response.clone())).await;
+                let _ = tx.send(StreamChunk::LifecycleEvent { phase: "llm_done".to_string() }).await;
                 Ok(response)
             }
         }
