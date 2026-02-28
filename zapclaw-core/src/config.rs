@@ -17,8 +17,14 @@ pub struct FileConfig {
     /// Model identifier
     pub model_name: Option<String>,
 
-    /// Maximum steps per agent loop
+    /// Max tool calls per turn — safety guard against runaway tool-call loops within a single turn.
+    /// Resets to zero at the start of each new user message. Has no effect on conversation length.
     pub max_steps: Option<usize>,
+
+    /// Anthropic adaptive thinking effort level.
+    /// Values: "low", "medium", "high". Absent/null = disabled.
+    /// Override with ZAPCLAW_THINKING_EFFORT env var.
+    pub thinking_effort: Option<String>,
 
     /// Enable inbound tunnel
     pub enable_inbound: Option<bool>,
@@ -88,6 +94,7 @@ impl Default for FileConfig {
             api_base_url: None,
             model_name: None,
             max_steps: None,
+            thinking_effort: None,
             enable_inbound: None,
             tool_timeout_secs: None,
             require_confirmation: None,
@@ -128,8 +135,15 @@ pub struct Config {
     /// Must be explicitly provided via --model-name, ZAPCLAW_MODEL, or config file
     pub model_name: String,
 
-    /// Maximum steps per agent loop (prevents infinite runs)
+    /// Max tool calls per turn — safety guard against runaway tool-call loops within a single turn.
+    /// Resets to zero at the start of each new user message. Has no effect on conversation length.
+    /// Default: 100. Override with ZAPCLAW_MAX_STEPS or config file.
     pub max_steps: usize,
+
+    /// Anthropic adaptive thinking effort level: "low", "medium", or "high".
+    /// None = disabled (default). Only applies to Anthropic API endpoints.
+    /// Override with ZAPCLAW_THINKING_EFFORT env var.
+    pub thinking_effort: Option<String>,
 
     /// Enable outbound tunnel (HTTPS proxy for cloud LLMs/browser)
     pub enable_outbound: bool,
@@ -201,11 +215,12 @@ impl Default for Config {
             workspace_path: PathBuf::from("./zapclaw_workspace"),
             api_base_url: String::new(), // Must be explicitly provided
             model_name: String::new(),   // Must be explicitly provided
-            max_steps: 15,
+            max_steps: 100,
+            thinking_effort: Some("medium".to_string()),
             enable_outbound: false,
             enable_inbound: false,
             tool_timeout_secs: 5,
-            require_confirmation: true,
+            require_confirmation: false,
             enable_egress_guard: true,
             context_window_tokens: 128_000,
             inbound_port: 9876,
@@ -896,6 +911,15 @@ impl Config {
             }
         }
 
+        if let Ok(effort) = std::env::var("ZAPCLAW_THINKING_EFFORT") {
+            let val = effort.trim().to_lowercase();
+            if val == "off" || val == "none" || val == "false" {
+                config.thinking_effort = None;
+            } else if matches!(val.as_str(), "low" | "medium" | "high") {
+                config.thinking_effort = Some(val);
+            }
+        }
+
         if let Ok(timeout) = std::env::var("ZAPCLAW_TOOL_TIMEOUT") {
             if let Ok(t) = timeout.parse::<u64>() {
                 config.tool_timeout_secs = t;
@@ -1003,6 +1027,9 @@ impl Config {
         if let Some(steps) = file_cfg.max_steps {
             config.max_steps = steps;
         }
+        if let Some(effort) = &file_cfg.thinking_effort {
+            config.thinking_effort = Some(effort.clone());
+        }
         if let Some(inbound) = file_cfg.enable_inbound {
             config.enable_inbound = inbound;
         }
@@ -1082,6 +1109,14 @@ impl Config {
                 if let Ok(n) = steps.parse::<usize>() {
                     config.max_steps = n;
                 }
+            }
+        }
+        if let Ok(effort) = std::env::var("ZAPCLAW_THINKING_EFFORT") {
+            let val = effort.trim().to_lowercase();
+            if val == "off" || val == "none" || val == "false" {
+                config.thinking_effort = None;
+            } else if matches!(val.as_str(), "low" | "medium" | "high") {
+                config.thinking_effort = Some(val);
             }
         }
         if std::env::var("ZAPCLAW_TOOL_TIMEOUT").is_ok() {
@@ -1196,7 +1231,7 @@ impl Config {
             "workspace_path": "./zapclaw_workspace",
             "api_base_url": "http://localhost:11434/v1",
             "model_name": "phi3:mini",
-            "max_steps": 15,
+            "max_steps": 100,
             "tool_timeout_secs": 30,
             "require_confirmation": true,
             "enable_egress_guard": true,
@@ -1229,6 +1264,7 @@ impl Config {
             api_base_url: if self.api_base_url.is_empty() { None } else { Some(self.api_base_url.clone()) },
             model_name: if self.model_name.is_empty() { None } else { Some(self.model_name.clone()) },
             max_steps: Some(self.max_steps),
+            thinking_effort: self.thinking_effort.clone(),
             enable_inbound: Some(self.enable_inbound),
             tool_timeout_secs: Some(self.tool_timeout_secs),
             require_confirmation: Some(self.require_confirmation),
@@ -1291,11 +1327,11 @@ mod tests {
         // api_base_url and model_name are now empty by default (must be explicitly provided)
         assert!(config.api_base_url.is_empty());
         assert!(config.model_name.is_empty());
-        assert_eq!(config.max_steps, 15);
+        assert_eq!(config.max_steps, 100);
         assert!(!config.enable_outbound);
         assert!(!config.enable_inbound);
         assert_eq!(config.tool_timeout_secs, 5);
-        assert!(config.require_confirmation);
+        assert!(!config.require_confirmation);
         assert_eq!(config.inbound_port, 9876);
         assert_eq!(config.inbound_bind, "127.0.0.1");
     }
@@ -1495,9 +1531,9 @@ mod tests {
         let merged = Config::from_sources(&file_cfg, &env_cfg);
 
         assert_eq!(merged.workspace_path, PathBuf::from("./zapclaw_workspace"));
-        assert_eq!(merged.max_steps, 15);
+        assert_eq!(merged.max_steps, 100);
         assert_eq!(merged.tool_timeout_secs, 5);
-        assert!(merged.require_confirmation);
+        assert!(!merged.require_confirmation);
     }
 
     #[test]

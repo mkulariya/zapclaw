@@ -394,7 +394,7 @@ fn build_context_section(workspace: &Path, max_chars: usize) -> String {
 /// Security safeguards:
 /// - Input sanitization on all user inputs
 /// - Human confirmation for sensitive tool calls
-/// - Max step limit (default: 15) prevents infinite loops
+/// - Max tool calls per turn (default: 100) guards against runaway tool-call loops
 /// - All actions logged to audit trail
 pub struct Agent {
     llm: Arc<dyn LlmClient>,
@@ -499,7 +499,7 @@ impl Agent {
             .sanitize(task)
             .context("Input validation failed")?;
 
-        log::info!("🦞 Starting task: {}", &sanitized_task[..sanitized_task.len().min(100)]);
+        log::debug!("🦞 Starting task: {}", &sanitized_task[..sanitized_task.floor_char_boundary(100)]);
 
         // Session persistence: ensure session exists
         if let Some(ref store) = self.session_store {
@@ -529,6 +529,7 @@ impl Agent {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         };
 
         // Session persistence: write user message
@@ -543,6 +544,7 @@ impl Agent {
                 tool_call_id: None,
                 tool_calls: None,
                 images: None,
+                anthropic_blocks: None,
             },
         ];
         messages.extend(previous_messages);
@@ -573,7 +575,7 @@ impl Agent {
             }
         }
 
-        let mut step = 0;
+        let mut step = 0;   // tool-call counter for this turn; resets each time run() is called
         let mut final_response = String::new();
         let mut recent_tool_outputs: VecDeque<String> = VecDeque::with_capacity(5);
 
@@ -590,21 +592,22 @@ impl Agent {
                 break;
             }
 
-            // Max steps guard
+            // Per-turn tool-call guard: stops runaway loops if the model keeps calling tools
+            // without producing a final text response. Resets each new user message.
             if step > self.config.max_steps {
-                log::warn!("⚠️  Max steps ({}) reached, stopping agent loop", self.config.max_steps);
+                log::warn!("⚠️  Max tool calls per turn ({}) reached, stopping", self.config.max_steps);
                 self.memory.log_action("max_steps_reached", None, None)?;
 
                 if final_response.is_empty() {
                     final_response = format!(
-                        "I've reached the maximum number of steps ({}). Here's what I have so far from the work done.",
+                        "I've hit the tool-call limit ({} calls) for this turn. Here's what I have so far.",
                         self.config.max_steps
                     );
                 }
                 break;
             }
 
-            log::info!("🔄 Step {}/{}", step, self.config.max_steps);
+            log::debug!("🔄 Tool call {}/{}", step, self.config.max_steps);
 
             // Repair any orphaned tool uses/results before calling LLM
             crate::truncation::repair_orphaned_tool_uses(&mut messages);
@@ -636,7 +639,7 @@ impl Agent {
             if let Some(ref content) = response.content {
                 if !content.is_empty() {
                     final_response = content.clone();
-                    log::info!("💬 LLM response: {}", &content[..content.len().min(200)]);
+                    log::debug!("💬 LLM response: {}", &content[..content.floor_char_boundary(200)]);
                 }
             }
 
@@ -650,6 +653,7 @@ impl Agent {
                         tool_call_id: None,
                         tool_calls: None,
                         images: None,
+                        anthropic_blocks: None,
                     };
                     if let Some(ref store) = self.session_store {
                         store.append_message(session_id, &asst_msg).ok();
@@ -660,13 +664,20 @@ impl Agent {
                 break;
             }
 
-            // Add assistant message with tool calls
+            // Add assistant message with tool calls.
+            // Preserve anthropic_blocks (thinking + tool_use) when present so that
+            // interleaved thinking context is echoed back on the next request.
             let asst_tc_msg = ChatMessage {
                 role: "assistant".to_string(),
                 content: response.content.clone().unwrap_or_default(),
                 tool_call_id: None,
                 tool_calls: Some(response.tool_calls.clone()),
                 images: None,
+                anthropic_blocks: if response.anthropic_blocks.is_empty() {
+                    None
+                } else {
+                    Some(response.anthropic_blocks.clone())
+                },
             };
             if let Some(ref store) = self.session_store {
                 store.append_message(session_id, &asst_tc_msg).ok();
@@ -680,10 +691,10 @@ impl Agent {
                     .await
                     .unwrap_or_else(|e| format!("Error: {}", e));
 
-                log::info!(
+                log::debug!(
                     "🔧 Tool '{}' result: {}",
                     tool_call.function.name,
-                    &tool_result[..tool_result.len().min(200)]
+                    &tool_result[..tool_result.floor_char_boundary(200)]
                 );
 
                 // Track recent tool outputs for taint detection (max 5 items)
@@ -701,6 +712,7 @@ impl Agent {
                     tool_call_id: Some(tool_call.id.clone()),
                     tool_calls: None,
                     images: None,
+                    anthropic_blocks: None,
                 };
                 if let Some(ref store) = self.session_store {
                     store.append_message(session_id, &tool_msg).ok();
@@ -741,7 +753,7 @@ impl Agent {
             .sanitize(task)
             .context("Input validation failed")?;
 
-        log::info!("🦞 Starting task (streaming): {}", &sanitized_task[..sanitized_task.len().min(100)]);
+        log::debug!("🦞 Starting task (streaming): {}", &sanitized_task[..sanitized_task.floor_char_boundary(100)]);
 
         // Session persistence: ensure session exists
         if let Some(ref store) = self.session_store {
@@ -774,6 +786,7 @@ impl Agent {
             tool_call_id: None,
             tool_calls: None,
             images,
+            anthropic_blocks: None,
         };
 
         // Session persistence: write user message (images not persisted — transient)
@@ -788,6 +801,7 @@ impl Agent {
                 tool_call_id: None,
                 tool_calls: None,
                 images: None,
+                anthropic_blocks: None,
             },
         ];
         messages.extend(previous_messages);
@@ -818,7 +832,7 @@ impl Agent {
             }
         }
 
-        let mut step = 0;
+        let mut step = 0;   // tool-call counter for this turn; resets each time run_stream() is called
         let mut final_response = String::new();
         let mut recent_tool_outputs: VecDeque<String> = VecDeque::with_capacity(5);
 
@@ -836,14 +850,15 @@ impl Agent {
                 break;
             }
 
-            // Max steps guard
+            // Per-turn tool-call guard: stops runaway loops if the model keeps calling tools
+            // without producing a final text response. Resets each new user message.
             if step > self.config.max_steps {
-                log::warn!("⚠️  Max steps ({}) reached, stopping agent loop", self.config.max_steps);
+                log::warn!("⚠️  Max tool calls per turn ({}) reached, stopping", self.config.max_steps);
                 self.memory.log_action("max_steps_reached", None, None)?;
 
                 if final_response.is_empty() {
                     final_response = format!(
-                        "I've reached the maximum number of steps ({}). Here's what I have so far from the work done.",
+                        "I've hit the tool-call limit ({} calls) for this turn. Here's what I have so far.",
                         self.config.max_steps
                     );
                 }
@@ -852,7 +867,7 @@ impl Agent {
 
             // Emit step lifecycle event
             let _ = tx.send(StreamChunk::LifecycleEvent { phase: "step".to_string() }).await;
-            log::info!("🔄 Step {}/{}", step, self.config.max_steps);
+            log::debug!("🔄 Tool call {}/{}", step, self.config.max_steps);
 
             // Repair any orphaned tool uses/results before calling LLM
             crate::truncation::repair_orphaned_tool_uses(&mut messages);
@@ -887,36 +902,56 @@ impl Agent {
             if let Some(ref content) = response.content {
                 if !content.is_empty() {
                     final_response = content.clone();
-                    log::info!("💬 LLM response: {}", &content[..content.len().min(200)]);
+                    log::debug!("💬 LLM response: {}", &content[..content.floor_char_boundary(200)]);
                 }
             }
 
             // If no tool calls, we're done
             if response.tool_calls.is_empty() {
-                if let Some(ref content) = response.content {
-                    let asst_msg = ChatMessage {
-                        role: "assistant".to_string(),
-                        content: content.clone(),
-                        tool_call_id: None,
-                        tool_calls: None,
-                        images: None,
-                    };
-                    if let Some(ref store) = self.session_store {
-                        store.append_message(session_id, &asst_msg).ok();
-                    }
-                    messages.push(asst_msg);
-                    self.memory.store(session_id, "assistant", content)?;
+                let content = response.content.as_deref().unwrap_or("").trim();
+                if content.is_empty() {
+                    // Model responded but with no text content and no tool calls.
+                    // This can happen if the model's SSE format doesn't match the
+                    // parser (check WARN logs for SSE parse failures), or if the
+                    // model genuinely returned an empty turn.
+                    log::warn!(
+                        "Model ({}) returned empty content with no tool calls — check WARN logs above for SSE parse details",
+                        self.config.model_name
+                    );
+                    final_response = String::new();
+                    break;
                 }
+                let content_owned = content.to_string();
+                let asst_msg = ChatMessage {
+                    role: "assistant".to_string(),
+                    content: content_owned.clone(),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    images: None,
+                    anthropic_blocks: None,
+                };
+                if let Some(ref store) = self.session_store {
+                    store.append_message(session_id, &asst_msg).ok();
+                }
+                messages.push(asst_msg);
+                self.memory.store(session_id, "assistant", &content_owned)?;
                 break;
             }
 
-            // Add assistant message with tool calls
+            // Add assistant message with tool calls.
+            // Preserve anthropic_blocks (thinking + tool_use) when present so that
+            // interleaved thinking context is echoed back on the next request.
             let asst_tc_msg = ChatMessage {
                 role: "assistant".to_string(),
                 content: response.content.clone().unwrap_or_default(),
                 tool_call_id: None,
                 tool_calls: Some(response.tool_calls.clone()),
                 images: None,
+                anthropic_blocks: if response.anthropic_blocks.is_empty() {
+                    None
+                } else {
+                    Some(response.anthropic_blocks.clone())
+                },
             };
             if let Some(ref store) = self.session_store {
                 store.append_message(session_id, &asst_tc_msg).ok();
@@ -950,7 +985,7 @@ impl Agent {
                 let _ = tx.send(StreamChunk::ToolEnd {
                     name: tool_call.function.name.clone(),
                     tool_call_id: tool_call.id.clone(),
-                    result: tool_result[..tool_result.len().min(200)].to_string(),
+                    result: tool_result[..tool_result.floor_char_boundary(200)].to_string(),
                     is_error,
                 }).await;
 
@@ -961,6 +996,7 @@ impl Agent {
                     tool_call_id: Some(tool_call.id.clone()),
                     tool_calls: None,
                     images: None,
+                    anthropic_blocks: None,
                 };
                 if let Some(ref store) = self.session_store {
                     store.append_message(session_id, &tool_msg).ok();
@@ -969,13 +1005,21 @@ impl Agent {
             }
         }
 
-        // Emit lifecycle end
-        let _ = tx.send(StreamChunk::LifecycleEvent { phase: "end".to_string() }).await;
-
         // Store final response
         if !final_response.is_empty() {
             self.memory.log_action("task_complete", Some(&final_response), None)?;
         }
+
+        // Signal end of the entire agent turn — one Done per run_stream call,
+        // after all LLM calls and tool executions are complete. The print task
+        // in the CLI breaks on this signal to flush its line buffer and exit.
+        let _ = tx.send(StreamChunk::Done(crate::llm::LlmResponse {
+            content: if final_response.is_empty() { None } else { Some(final_response.clone()) },
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+            anthropic_blocks: vec![],
+        })).await;
 
         Ok(final_response)
     }
@@ -1075,9 +1119,9 @@ impl Agent {
                         }
 
                         if egress_guard_confirmed {
-                            log::info!("✅ Medium-risk egress approved for '{}' (skips normal confirmation)", tool_name);
+                            log::debug!("✅ Medium-risk egress approved for '{}' (skips normal confirmation)", tool_name);
                         } else {
-                            log::info!("✅ Medium-risk egress approved for '{}'", tool_name);
+                            log::debug!("✅ Medium-risk egress approved for '{}'", tool_name);
                         }
                     }
                     EgressRiskLevel::Low => {
@@ -1101,7 +1145,7 @@ impl Agent {
                 args.clone()
             };
 
-            log::info!(
+            log::debug!(
                 "⚠️  Tool '{}' requires confirmation. Args: {}",
                 tool_name,
                 preview
@@ -1163,7 +1207,7 @@ impl Agent {
                 return Err(anyhow::anyhow!(error_msg));
             }
 
-            log::info!("✅ Tool '{}' approved", tool_name);
+            log::debug!("✅ Tool '{}' approved", tool_name);
         }
 
         // Execute with timeout
@@ -1212,6 +1256,7 @@ impl Agent {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         }];
         let resp = self.llm.complete(&req, &[]).await?;
         Ok(resp.content.unwrap_or_else(|| "[conversation summary unavailable]".to_string()))
@@ -1266,6 +1311,7 @@ impl Agent {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         }];
         match self.llm.complete(&req, &[]).await {
             Ok(resp) => Ok(resp.content.unwrap_or(combined)),
@@ -1335,6 +1381,7 @@ impl Agent {
                 tool_call_id: None,
                 tool_calls: None,
                 images: None,
+                anthropic_blocks: None,
             },
         ];
         compacted.extend_from_slice(to_keep);
@@ -1378,6 +1425,7 @@ impl Agent {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         };
         messages.insert(0, system_msg);
 
@@ -1451,6 +1499,7 @@ impl Agent {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         }];
 
         match self.llm.complete(&flush_request, &[]).await {
@@ -1478,7 +1527,7 @@ impl Agent {
                     let _ = file.write_all(header.as_bytes());
                     let _ = file.write_all(insights.as_bytes());
                     let _ = file.write_all(b"\n");
-                    log::info!("Session insights flushed to memory/{}.md", date);
+                    log::debug!("Session insights flushed to memory/{}.md", date);
                 }
             }
             Err(e) => {
