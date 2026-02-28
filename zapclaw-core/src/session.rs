@@ -262,6 +262,7 @@ impl SessionStore {
                 tool_call_id: entry.tool_call_id,
                 tool_calls: entry.tool_calls,
                 images: None,
+                anthropic_blocks: None,
             });
         }
         Ok(messages)
@@ -341,6 +342,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         };
         store.append_message("sess_1", &user_msg).unwrap();
 
@@ -350,6 +352,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         };
         store.append_message("sess_1", &asst_msg).unwrap();
 
@@ -412,6 +415,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         };
         store.append_message("sess_repair", &user_msg).unwrap();
 
@@ -439,6 +443,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         };
         store.append_message("sess_corrupt", &user_msg).unwrap();
 

@@ -43,6 +43,7 @@ impl MockLlmClient {
                 completion_tokens: 5,
                 total_tokens: 15,
             }),
+            anthropic_blocks: vec![],
         }
     }
 
@@ -59,6 +60,7 @@ impl MockLlmClient {
             }],
             finish_reason: "tool_calls".to_string(),
             usage: None,
+            anthropic_blocks: vec![],
         }
     }
 }
@@ -161,7 +163,7 @@ async fn test_agent_max_steps() {
     ]);
 
     let result = agent.run("test-session", "Loop forever").await.unwrap();
-    assert!(result.contains("maximum number of steps"));
+    assert!(result.contains("tool-call limit"));
 }
 
 #[tokio::test]
@@ -302,6 +304,7 @@ impl LlmClient for OverflowLlmClient {
             tool_calls: vec![],
             finish_reason: "stop".to_string(),
             usage: None,
+            anthropic_blocks: vec![],
         })
     }
 
@@ -465,12 +468,14 @@ async fn test_confirmation_denied_tool_does_not_execute() {
             }],
             finish_reason: "tool_calls".to_string(),
             usage: None,
+            anthropic_blocks: vec![],
         },
         LlmResponse {
             content: Some("Tool was denied".to_string()),
             tool_calls: vec![],
             finish_reason: "stop".to_string(),
             usage: None,
+            anthropic_blocks: vec![],
         },
     ];
 
@@ -536,12 +541,14 @@ async fn test_confirmation_allowed_tool_executes() {
             }],
             finish_reason: "tool_calls".to_string(),
             usage: None,
+            anthropic_blocks: vec![],
         },
         LlmResponse {
             content: Some("Task complete".to_string()),
             tool_calls: vec![],
             finish_reason: "stop".to_string(),
             usage: None,
+            anthropic_blocks: vec![],
         },
     ];
 

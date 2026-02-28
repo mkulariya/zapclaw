@@ -287,6 +287,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         }
     }
 
@@ -297,6 +298,7 @@ mod tests {
             tool_call_id: Some(call_id.to_string()),
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         }
     }
 
@@ -319,6 +321,7 @@ mod tests {
                     .collect(),
             ),
             images: None,
+            anthropic_blocks: None,
         }
     }
 
@@ -464,6 +467,7 @@ mod tests {
                     },
                 }]),
                 images: None,
+                anthropic_blocks: None,
             },
             // call_1 result is gone
         ];
@@ -537,6 +541,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         }];
         let r = evaluate_context_window_guard(&msgs, 17_000);
         assert!(r.should_block);
@@ -551,6 +556,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             images: None,
+            anthropic_blocks: None,
         }];
         // 38K context − ~7K used = ~31K remaining → warn (< 32K), not block (> 16K)
         let r = evaluate_context_window_guard(&msgs, 38_000);

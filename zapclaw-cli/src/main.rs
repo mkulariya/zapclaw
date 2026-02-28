@@ -19,7 +19,7 @@ use zapclaw_tools::find_tool::FindTool;
 use zapclaw_tools::grep_tool::GrepTool;
 use zapclaw_tools::image_tool::ImageTool;
 use zapclaw_tools::math_tool::MathTool;
-use zapclaw_tools::memory_tool::{MemoryGetTool, MemorySearchTool};
+use zapclaw_tools::memory_tool::MemoryGetTool;
 use zapclaw_tools::patch_tool::PatchTool;
 use zapclaw_tools::process_tool::ProcessTool;
 use zapclaw_tools::session_tool::SessionTool;
@@ -134,6 +134,7 @@ struct ResolvedLlmSettings {
     api_base_url: String,
     model_name: String,
     api_key: Option<String>,
+    #[allow(dead_code)]
     endpoint_kind: EndpointKind,
 }
 
@@ -389,6 +390,80 @@ fn detect_and_encode_images(input: &str, workspace: &std::path::Path) -> Vec<Str
     data_uris
 }
 
+/// Render a single line of markdown to ANSI-escaped terminal output.
+///
+/// Handles block-level elements (headings, bullets, rules) and inline
+/// elements (bold, italic, inline code) using ANSI escape codes.
+fn render_markdown_line(line: &str) -> String {
+    // Block-level elements (must be at start of line)
+    if let Some(rest) = line.strip_prefix("### ") {
+        return format!("\x1b[1m{}\x1b[0m", render_inline_md(rest));
+    }
+    if let Some(rest) = line.strip_prefix("## ") {
+        return format!("\x1b[1m{}\x1b[0m", render_inline_md(rest));
+    }
+    if let Some(rest) = line.strip_prefix("# ") {
+        return format!("\x1b[1;4m{}\x1b[0m", render_inline_md(rest));
+    }
+    if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        return format!("  • {}", render_inline_md(rest));
+    }
+    if line == "---" || line == "***" || line == "___" {
+        return "\x1b[2m────────────────────────────────────────\x1b[0m".to_string();
+    }
+    render_inline_md(line)
+}
+
+/// Render inline markdown spans (bold, italic, code) to ANSI escape codes.
+/// Processes left-to-right; handles UTF-8 correctly.
+fn render_inline_md(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() + 64);
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        // Bold: **...**
+        if remaining.starts_with("**") {
+            if let Some(end) = remaining[2..].find("**") {
+                result.push_str("\x1b[1m");
+                result.push_str(&remaining[2..2 + end]);
+                result.push_str("\x1b[0m");
+                remaining = &remaining[2 + end + 2..];
+                continue;
+            }
+        }
+        // Inline code: `...` (but not triple backtick)
+        if remaining.starts_with('`') && !remaining.starts_with("```") {
+            if let Some(end) = remaining[1..].find('`') {
+                result.push_str("\x1b[36m");
+                result.push_str(&remaining[1..1 + end]);
+                result.push_str("\x1b[0m");
+                remaining = &remaining[1 + end + 1..];
+                continue;
+            }
+        }
+        // Italic: *...* (but not **)
+        if remaining.starts_with('*') && !remaining.starts_with("**") {
+            if let Some(end) = remaining[1..].find('*') {
+                let closing = &remaining[1 + end..];
+                if !closing.starts_with("**") {
+                    result.push_str("\x1b[3m");
+                    result.push_str(&remaining[1..1 + end]);
+                    result.push_str("\x1b[0m");
+                    remaining = &remaining[1 + end + 1..];
+                    continue;
+                }
+            }
+        }
+        // Advance one Unicode scalar value
+        let mut chars = remaining.chars();
+        if let Some(c) = chars.next() {
+            result.push(c);
+            remaining = chars.as_str();
+        }
+    }
+    result
+}
+
 /// Run agent with streaming output.
 ///
 /// Creates a channel, spawns a task to print stream chunks in real-time,
@@ -421,13 +496,20 @@ async fn run_with_streaming(
     let print_handle = tokio::spawn(async move {
         use std::io::{self, Write};
         let mut stdout = io::stdout();
+        // Buffer partial lines; flush + render when a newline arrives
+        let mut line_buf = String::new();
 
         while let Some(chunk) = rx.recv().await {
             match chunk {
                 StreamChunk::TextDelta(text) => {
-                    // Print token by token without newlines
-                    print!("{}", text);
-                    stdout.flush().ok();
+                    line_buf.push_str(&text);
+                    // Flush every complete line with markdown rendering
+                    while let Some(pos) = line_buf.find('\n') {
+                        let line = line_buf[..pos].to_string();
+                        line_buf = line_buf[pos + 1..].to_string();
+                        println!("{}", render_markdown_line(&line));
+                        stdout.flush().ok();
+                    }
                 }
                 StreamChunk::ToolCallDelta { .. } => {
                     // Tool calls are handled silently, final output will show results
@@ -453,7 +535,12 @@ async fn run_with_streaming(
                     // Other lifecycle events — silent for now
                 }
                 StreamChunk::Done(_) => {
-                    // Final response received, stop streaming
+                    // Flush any remaining partial line, then stop
+                    if !line_buf.is_empty() {
+                        print!("{}", render_markdown_line(&line_buf));
+                        stdout.flush().ok();
+                    }
+                    println!();
                     break;
                 }
             }
@@ -759,9 +846,10 @@ async fn main() -> Result<()> {
     // Initialize components
     let api_key = llm_settings.api_key;
 
-    let llm: Arc<dyn zapclaw_core::llm::LlmClient> = Arc::new(
-        OpenAiCompatibleClient::new(&config.api_base_url, &config.model_name, api_key.clone())
-    );
+    let llm_client = OpenAiCompatibleClient::new(&config.api_base_url, &config.model_name, api_key.clone())
+        .with_thinking_effort(config.thinking_effort.clone());
+    let thinking_handle = llm_client.thinking_effort_handle();
+    let llm: Arc<dyn zapclaw_core::llm::LlmClient> = Arc::new(llm_client);
 
     // File-based memory with SQLite indexing
     let memory = Arc::new(
@@ -976,7 +1064,7 @@ async fn main() -> Result<()> {
             if uris.is_empty() { None } else { Some(uris) }
         };
         let response = run_with_streaming(&agent, &session_id, &task, images).await?;
-        println!("\n{}", extract_final_response(&response));
+        let _ = extract_final_response(&response); // Response already printed by streaming handler
 
         // Shutdown memory daemon if running
         if let Some((daemon, _)) = daemon_handle {
@@ -1045,6 +1133,15 @@ async fn main() -> Result<()> {
         .context("Failed to initialize line editor")?;
     rl.set_helper(Some(ZapClawHelper));
 
+    // Flush stdout before entering the REPL loop. Without this, buffered bytes
+    // from startup println!/log output may not have reached the terminal yet,
+    // causing rustyline's prompt write to appear out of order — the prompt stays
+    // invisible until Enter is pressed.
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
+
     loop {
         let readline = rl.readline("🦞 ❯ ");
         match readline {
@@ -1055,17 +1152,17 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                if input == "exit" || input == "quit" || input == "q" || input == "/exit" {
+                if input == "/exit" || input == "/quit" || input == "exit" || input == "quit" {
                     println!("👋 Goodbye!");
                     break;
                 }
 
-                if input == "help" || input == "/help" {
+                if input == "/help" {
                     print_help();
                     continue;
                 }
 
-                if input == "tools" || input == "/tools" {
+                if input == "/tools" {
                     print_tools(&agent);
                     continue;
                 }
@@ -1194,6 +1291,32 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // /thinking command — show or change adaptive thinking effort level
+                if input == "/thinking" || input.starts_with("/thinking ") {
+                    let arg = input.strip_prefix("/thinking").unwrap_or("").trim();
+
+                    if arg.is_empty() {
+                        let current = thinking_handle.lock().unwrap().clone();
+                        match current {
+                            Some(ref level) => println!("\n🧠 Thinking: {} (adaptive)\n  /thinking low|medium|high  — change level\n  /thinking off              — disable\n", level),
+                            None => println!("\n🧠 Thinking: off\n  /thinking low|medium|high  — enable at that level\n"),
+                        }
+                    } else {
+                        match arg {
+                            "low" | "medium" | "high" => {
+                                *thinking_handle.lock().unwrap() = Some(arg.to_string());
+                                println!("🧠 Thinking set to: {} (adaptive)", arg);
+                            }
+                            "off" | "none" => {
+                                *thinking_handle.lock().unwrap() = None;
+                                println!("🧠 Thinking disabled.");
+                            }
+                            _ => eprintln!("❌ Unknown thinking level: '{}'. Use: low, medium, high, off", arg),
+                        }
+                    }
+                    continue;
+                }
+
                 rl.add_history_entry(input).ok();
 
                 // Detect images referenced in user input and encode as data URIs
@@ -1205,11 +1328,22 @@ async fn main() -> Result<()> {
                 // Run the task with streaming
                 match run_with_streaming(&agent, &session_id, input, images).await {
                     Ok(response) => {
-                        println!("\n{}\n", extract_final_response(&response));
+                        let text = extract_final_response(&response);
+                        if text.is_empty() {
+                            eprintln!("\n⚠️  No response from model. The model may have returned an empty or unparseable reply — run with RUST_LOG=warn to see details.\n");
+                        }
+                        // Response already printed by run_with_streaming's streaming handler
                     }
                     Err(e) => {
                         eprintln!("\n❌ Error: {:#}\n", e);
                     }
+                }
+                // Flush stdout so the response is fully written before rustyline
+                // prints the next prompt — prevents the prompt from appearing blank
+                // until Enter is pressed.
+                {
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
                 }
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
@@ -1595,6 +1729,7 @@ static SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/status",      "Show session info (memory, tokens, session ID)"),
     ("/confirm",     "Show or change confirmation mode"),
     ("/compact",     "Compact conversation history (LLM summarisation)"),
+    ("/thinking",    "Show or change adaptive thinking effort (low/medium/high/off)"),
     ("/resume",      "List or resume a previous session"),
     ("/update",      "Self-update ZapClaw from git"),
     ("/exit",        "Exit ZapClaw"),
@@ -1719,11 +1854,12 @@ fn print_help() {
     /tools        List available tools
     /status       Show session info (memory, tokens, session ID)
     /confirm      Show or change confirmation mode (ask/allow/deny)
-    /compact      Compact conversation history (LLM summarisation)
-    /resume       List recent sessions
-    /resume <id>  Resume a specific session
-    /update       Self-update from git
-    /exit         Exit ZapClaw  (also: exit, quit, q)
+    /compact          Compact conversation history (LLM summarisation)
+    /thinking         Show or change thinking effort (low/medium/high/off)
+    /resume           List recent sessions
+    /resume <id>      Resume a specific session
+    /update           Self-update from git
+    /exit             Exit ZapClaw  (also: /quit, exit, quit)
 
   Skills:
     Place SKILL.md files in .skills/<name>/SKILL.md

@@ -331,8 +331,8 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
             // IPv4 is in last 4 bytes: octets[12..16]
             let a = octets[12] as u8;
             let b = octets[13] as u8;
-            let c = octets[14] as u8;
-            let d = octets[15] as u8;
+            let _c = octets[14] as u8;
+            let _d = octets[15] as u8;
 
             // Check if the embedded IPv4 is private/loopback/link-local
             // Loopback: 127.0.0.0/8

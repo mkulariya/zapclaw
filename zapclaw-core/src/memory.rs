@@ -86,6 +86,7 @@ fn delete_chunk_vec(db: &Connection, chunk_id: &str) -> Result<()> {
 pub struct MemoryDb {
     workspace: PathBuf,
     db: Mutex<Connection>,
+    #[allow(dead_code)]
     target_dims: usize,
     chunk_tokens: usize,
     chunk_overlap: usize,
@@ -672,6 +673,11 @@ impl MemoryDb {
             ).ok();
         }
 
+        // Register sqlite-vec extension BEFORE opening the connection.
+        // sqlite3_auto_extension only applies to connections opened AFTER registration —
+        // so this must come before Connection::open() or the vec0 module won't load.
+        register_sqlite_vec();
+
         // Open SQLite index database (matching OpenClaw's store.path)
         let db_path = workspace.join("memory.db");
         let conn = Connection::open(&db_path)
@@ -685,9 +691,6 @@ impl MemoryDb {
         if !fts_available {
             log::warn!("FTS5 unavailable — keyword search disabled");
         }
-
-        // Register sqlite-vec extension (P2-4)
-        register_sqlite_vec();
 
         // Create chunks_vec table if it doesn't exist (P2-4)
         // Use default target_dims (512) for initial schema creation
@@ -1194,7 +1197,7 @@ impl MemoryDb {
         match result {
             Ok(n) => {
                 db.execute_batch("COMMIT")?;
-                log::info!("Shadow swap committed: {} chunks updated", n);
+                log::debug!("Shadow swap committed: {} chunks updated", n);
 
                 // Migrate embeddings to chunks_vec after swap (P2-4)
                 if self.vec_available {
