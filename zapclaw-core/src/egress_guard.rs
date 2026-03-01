@@ -329,7 +329,7 @@ impl EgressGuard {
         // Check recent outputs (truncated)
         for (idx, output) in recent_outputs.iter().enumerate().take(self.config.taint_max_recent_items) {
             let truncated = if output.len() > self.config.taint_recent_output_chars_per_item {
-                &output[..self.config.taint_recent_output_chars_per_item]
+                &output[..output.floor_char_boundary(self.config.taint_recent_output_chars_per_item)]
             } else {
                 output
             };
@@ -419,7 +419,7 @@ impl EgressGuard {
         if payload.len() <= 200 {
             payload.to_string()
         } else {
-            format!("{}...{}", &payload[..100], &payload[payload.len()-100..])
+            format!("{}...{}", &payload[..payload.floor_char_boundary(100)], &payload[payload.ceil_char_boundary(payload.len()-100)..])
         }
     }
 

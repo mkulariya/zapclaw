@@ -329,8 +329,18 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
                 current = String::new();
             }
             
-            for chunk in line.as_bytes().chunks(max_len) {
-                chunks.push(String::from_utf8_lossy(chunk).to_string());
+            let mut pos = 0;
+            while pos < line.len() {
+                let target = (pos + max_len).min(line.len());
+                let end = line.floor_char_boundary(target);
+                if end <= pos {
+                    let end = line.ceil_char_boundary(pos + 1).min(line.len());
+                    chunks.push(line[pos..end].to_string());
+                    pos = end;
+                } else {
+                    chunks.push(line[pos..end].to_string());
+                    pos = end;
+                }
             }
             continue;
         }

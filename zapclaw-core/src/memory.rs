@@ -1763,7 +1763,7 @@ impl MemoryDb {
             let source: String = r.get(2)?;
             let score = bm25_rank_to_score(rank);
             let snippet = if text.len() > SNIPPET_MAX_CHARS {
-                text[..SNIPPET_MAX_CHARS].to_string()
+                text[..text.floor_char_boundary(SNIPPET_MAX_CHARS)].to_string()
             } else {
                 text
             };
@@ -1825,7 +1825,7 @@ impl MemoryDb {
             }
             if score > 0.0 {
                 let snippet = if text.len() > SNIPPET_MAX_CHARS {
-                    text[..SNIPPET_MAX_CHARS].to_string()
+                    text[..text.floor_char_boundary(SNIPPET_MAX_CHARS)].to_string()
                 } else {
                     text
                 };
@@ -1939,7 +1939,7 @@ impl MemoryDb {
             .map(|(id, path, source, start, end, text)| {
                 let score = *score_map.get(&id).unwrap_or(&0.0);
                 let snippet = if text.len() > SNIPPET_MAX_CHARS {
-                    text[..SNIPPET_MAX_CHARS].to_string()
+                    text[..text.floor_char_boundary(SNIPPET_MAX_CHARS)].to_string()
                 } else {
                     text
                 };
@@ -2007,7 +2007,7 @@ impl MemoryDb {
             }
             let score = cosine_similarity(query_vec, &emb);
             let snippet = if text.len() > SNIPPET_MAX_CHARS {
-                text[..SNIPPET_MAX_CHARS].to_string()
+                text[..text.floor_char_boundary(SNIPPET_MAX_CHARS)].to_string()
             } else {
                 text
             };

@@ -301,8 +301,8 @@ fn truncate_context_file(content: &str, filename: &str, max_chars: usize) -> Str
     }
     let head_chars = (max_chars as f64 * CONTEXT_HEAD_RATIO) as usize;
     let tail_chars = (max_chars as f64 * CONTEXT_TAIL_RATIO) as usize;
-    let head = &trimmed[..head_chars];
-    let tail = &trimmed[trimmed.len() - tail_chars..];
+    let head = &trimmed[..trimmed.floor_char_boundary(head_chars)];
+    let tail = &trimmed[trimmed.ceil_char_boundary(trimmed.len() - tail_chars)..];
     let marker = format!(
         "\n[...truncated, read {} for full content...]\n\u{2026}(truncated {}: kept {}+{} chars of {})…\n",
         filename, filename, head_chars, tail_chars, trimmed.len()
@@ -1142,7 +1142,7 @@ impl Agent {
             // Show args preview (head + tail for security)
             let args = &tool_call.function.arguments;
             let preview = if args.len() > 300 {
-                format!("{}...{}", &args[..150], &args[args.len()-150..])
+                format!("{}...{}", &args[..args.floor_char_boundary(150)], &args[args.ceil_char_boundary(args.len()-150)..])
             } else {
                 args.clone()
             };

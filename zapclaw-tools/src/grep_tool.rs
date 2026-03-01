@@ -150,7 +150,7 @@ impl Tool for GrepTool {
 
         // Truncate total output
         if result.len() > self.max_output_chars {
-            result = result[..self.max_output_chars].to_string();
+            result = result[..result.floor_char_boundary(self.max_output_chars)].to_string();
             result.push_str("\n\n... (output truncated)");
         }
 

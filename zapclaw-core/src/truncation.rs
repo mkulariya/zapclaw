@@ -47,10 +47,11 @@ pub fn truncate_tool_result(text: &str, max_chars: usize) -> String {
         .min(text.len());
 
     // Try to break at last newline within 80% of keep_chars
-    let cut_point = text[..keep_chars]
+    let safe_keep = text.floor_char_boundary(keep_chars);
+    let cut_point = text[..safe_keep]
         .rfind('\n')
-        .filter(|&pos| pos > (keep_chars * 4 / 5))
-        .unwrap_or(keep_chars);
+        .filter(|&pos| pos > (safe_keep * 4 / 5))
+        .unwrap_or(safe_keep);
 
     format!("{}{}", &text[..cut_point], TRUNCATION_SUFFIX)
 }
@@ -92,7 +93,7 @@ pub fn estimate_tokens(text: &str) -> usize {
     let byte_len   = text.len();
     let char_count = text.chars().count();
     let non_ascii  = byte_len.saturating_sub(char_count);
-    let sample     = &text[..byte_len.min(256)];
+    let sample     = &text[..text.floor_char_boundary(byte_len.min(256))];
 
     let base = if is_base64_like(sample) {
         (char_count * 3 + 3) / 4       // ~1.33 chars/token

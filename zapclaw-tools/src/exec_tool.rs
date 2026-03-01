@@ -92,8 +92,8 @@ impl ExecTool {
             return output.to_string();
         }
         let half = max_chars / 2;
-        let start = &output[..half];
-        let end = &output[output.len() - half..];
+        let start = &output[..output.floor_char_boundary(half)];
+        let end = &output[output.ceil_char_boundary(output.len() - half)..];
         format!(
             "{}\n\n... [truncated {} chars] ...\n\n{}",
             start,

@@ -642,8 +642,11 @@ fn extract_final_response(response: &str) -> String {
     // Check for <final>...</final> tags
     if let Some(start) = response.find("<final>") {
         if let Some(end) = response.find("</final>") {
-            let final_content = &response[start + 7..end];
-            return final_content.trim().to_string();
+            let content_start = start + 7;
+            if content_start <= end {
+                let final_content = &response[content_start..end];
+                return final_content.trim().to_string();
+            }
         }
     }
 

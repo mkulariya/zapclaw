@@ -57,7 +57,7 @@ impl FileTool {
             String::new()
         };
         let preview = if content.len() > 400 {
-            format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &content[..400], content.len())
+            format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &content[..content.floor_char_boundary(400)], content.len())
         } else {
             content.to_string()
         };
@@ -87,7 +87,7 @@ impl FileTool {
 
         // -- preview + confirmation --
         let preview = if content.len() > 400 {
-            format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &content[..400], content.len())
+            format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &content[..content.floor_char_boundary(400)], content.len())
         } else {
             content.to_string()
         };

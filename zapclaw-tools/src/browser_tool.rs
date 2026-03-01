@@ -104,7 +104,7 @@ impl BrowserTool {
         if text.len() > max_length {
             Ok(format!(
                 "{}\n\n[Truncated: showing {}/{} characters]",
-                &text[..max_length],
+                &text[..text.floor_char_boundary(max_length)],
                 max_length,
                 text.len()
             ))
