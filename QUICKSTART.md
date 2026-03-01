@@ -159,9 +159,24 @@ zapclaw --no-sandbox
 # Install ADB
 pkg install android-tools
 
-# Enable USB debugging on your Android device:
-# Settings → About Phone → Tap "Build Number" 7 times
-# Settings → System → Developer Options → Enable "USB Debugging"
+# Enable Wireless Debugging:
+# Settings → System → Developer Options → Wireless Debugging → ON
+
+# IMPORTANT: The pairing port dies the moment the pairing dialog closes.
+# You MUST keep both Termux and the dialog visible at the same time.
+# Use splitscreen (long-press Termux → "Split top") or minimize Termux
+# so it floats over Settings.
+
+# 1. In Settings, tap "Pair device with pairing code"
+# 2. Note the port and 6-digit code
+# 3. In Termux (while dialog is still visible), run:
+adb pair 192.168.1.X:PAIRING_PORT
+# 4. Enter the 6-digit code → "Successfully paired"
+
+# 5. Connect using the MAIN port shown on the Wireless Debugging screen
+#    (different from the pairing port)
+adb connect 192.168.1.X:MAIN_PORT
+adb devices
 
 # Run with Android control enabled
 zapclaw --enable-android --no-sandbox --no-confirm

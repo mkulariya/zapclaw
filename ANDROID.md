@@ -67,7 +67,7 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
      "workspace_path": "~/zapclaw_workspace",
      "api_base_url": "http://localhost:11434/v1",
      "model_name": "phi3:mini",
-     "max_steps": 15,
+     "max_steps": 100,
      "tool_timeout_secs": 30,
      "require_confirmation": false,
      "enable_egress_guard": true,
@@ -77,19 +77,18 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
    }
    ```
 
-   **Step 3c: Add API keys to .bashrc**
-   ```bash
-   cat >> ~/.bashrc << 'EOF'
+   **Step 3c: Add API keys**
 
-   # ZapClaw Configuration
-   export ZAPCLAW_API_KEY=sk-your-key-here
-   export ZAPCLAW_SEARCH_API_KEY=your-brave-api-key
-   export ZAPCLAW_TELEGRAM_TOKEN=your-telegram-bot-token
-   export ZAPCLAW_TELEGRAM_ALLOWED_IDS=123456789,987654321
-   export PATH="$PATH:$HOME/.cargo/bin"
+   Create `~/.zapclaw/.env` — ZapClaw loads it automatically on startup:
+   ```bash
+   cat > ~/.zapclaw/.env << 'EOF'
+   ZAPCLAW_API_KEY=sk-your-key-here
+   ZAPCLAW_SEARCH_API_KEY=your-brave-api-key
+   ZAPCLAW_TELEGRAM_TOKEN=your-telegram-bot-token
+   ZAPCLAW_TELEGRAM_ALLOWED_IDS=123456789,987654321
    EOF
 
-   source ~/.bashrc
+   chmod 600 ~/.zapclaw/.env
    ```
 
    **Step 3d: Start Ollama (required for memory embeddings)**
@@ -106,14 +105,39 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
    pkg install android-tools
    ```
 
-5. **Enable USB Debugging** on your Android device:
-   - Settings → About Phone → Tap "Build Number" 7 times
-   - Settings → System → Developer Options → Enable "USB Debugging"
+5. **Enable Wireless Debugging**:
+   - Settings → About Phone → Tap **Build Number** 7 times
+   - Settings → System → Developer Options → **Wireless Debugging** → ON
 
-4. **Verify ADB** works:
+6. **Pair ADB** (this is the critical step — read carefully):
+
+   > **IMPORTANT:** The pairing port is only alive while the "Pair device with pairing code"
+   > dialog is visible on screen. If you switch away from it, the port dies immediately.
+   > You MUST keep both Termux and the pairing dialog visible at the same time.
+
+   - **Option A — Splitscreen:** Long-press Termux in recent apps → "Split top/bottom".
+     Open Settings → Wireless Debugging in the other half.
+   - **Option B — Floating/minimized Termux:** Minimize Termux so it floats over Settings.
+
+   Then:
+   1. In the Settings half, tap **"Pair device with pairing code"**
+   2. Note the **port** and **6-digit code** shown in the dialog
+   3. In the Termux half, immediately run:
+      ```bash
+      adb pair 192.168.1.X:PAIRING_PORT
+      ```
+   4. Enter the 6-digit code when prompted
+   5. You should see: `Successfully paired to 192.168.1.X:PAIRING_PORT`
+
+7. **Connect ADB** (use the **main port** shown on the Wireless Debugging screen — different from the pairing port):
+   ```bash
+   adb connect 192.168.1.X:MAIN_PORT
+   ```
+
+8. **Verify**:
    ```bash
    adb devices
-   # Should show: XXXXXXXX  device
+   # Should show: 192.168.1.X:MAIN_PORT  device
    ```
 
 5. **Run ZapClaw**:
