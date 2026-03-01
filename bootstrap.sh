@@ -336,6 +336,11 @@ create_zapclaw_home_config() {
     local config_dir="$HOME/.zapclaw"
     local config_file="$config_dir/zapclaw.json"
 
+    if [ -f "$config_file" ]; then
+        log_success "Home config already exists at $config_file"
+        return 0
+    fi
+
     # Create directory with secure permissions
     mkdir -p "$config_dir" 2>/dev/null || {
         log_error "Failed to create config directory: $config_dir"
@@ -348,39 +353,14 @@ create_zapclaw_home_config() {
         chmod 700 "$config_dir" 2>/dev/null || true
     fi
 
-    # Create config file with sensible defaults
-    # NOTE: api_base_url and model_name are EMPTY (must be set by user)
-    cat > "$config_file" << 'EOF'
-{
-  "workspace_path": "./zapclaw_workspace",
-  "api_base_url": "",
-  "model_name": "",
-  "max_steps": 15,
-  "tool_timeout_secs": 30,
-  "require_confirmation": true,
-  "enable_egress_guard": true,
-  "context_window_tokens": 128000,
-  "memory_embedding_base_url": "http://localhost:11434/v1",
-  "memory_embedding_model": "nomic-embed-text:v1.5",
-  "memory_embedding_target_dims": 512,
-  "memory_embedding_batch_size": 32,
-  "memory_daemon_enabled": true,
-  "memory_sync_interval_secs": 15,
-  "memory_sync_on_search": true,
-  "memory_require_embeddings": true,
-  "memory_allow_lexical_fallback": false,
-  "memory_cache_max_entries": 50000,
-  "telegram_enabled": false
-}
-EOF
-
-    # Set file permissions (0600 on Unix systems)
-    # Skip on macOS and Termux
-    if [ "$(uname)" != "Darwin" ] && [ -z "${TERMUX_VERSION:-}" ]; then
-        chmod 600 "$config_file" 2>/dev/null || true
+    # Use zapclaw --init-config to generate config from Rust defaults (single source of truth)
+    if zapclaw --init-config --config "$config_file" 2>/dev/null; then
+        log_success "Home config created at $config_file"
+    else
+        log_error "Failed to create config file via zapclaw --init-config"
+        return 1
     fi
 
-    log_success "Home config created at $config_file"
     log_warn "Please edit the config file to set api_base_url and model_name"
 }
 

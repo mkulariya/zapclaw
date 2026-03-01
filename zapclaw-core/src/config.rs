@@ -1302,8 +1302,8 @@ impl Config {
     pub fn default_template_json(_workspace_hint: &Path) -> String {
         let template = serde_json::json!({
             "workspace_path": "./zapclaw_workspace",
-            "api_base_url": "http://localhost:11434/v1",
-            "model_name": "phi3:mini",
+            "api_base_url": "",
+            "model_name": "",
             "max_steps": 100,
             "tool_timeout_secs": 30,
             "require_confirmation": true,
