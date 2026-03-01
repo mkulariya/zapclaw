@@ -85,6 +85,10 @@ pub struct FileConfig {
     /// Maximum characters per context file (SOUL.md, USER.md, AGENTS.md, CONTEXT.md)
     /// before truncation. Default: 20_000 (matches OpenClaw default).
     pub context_file_max_chars: Option<usize>,
+
+    /// Optional vision model for image analysis (e.g. glm-4.5v, llava).
+    /// When None/empty, uses the main model_name (most modern models are multimodal).
+    pub vision_model: Option<String>,
 }
 
 impl Default for FileConfig {
@@ -114,6 +118,7 @@ impl Default for FileConfig {
             memory_cache_max_entries: None,
             telegram_enabled: None,
             context_file_max_chars: None,
+            vision_model: None,
         }
     }
 }
@@ -207,6 +212,10 @@ pub struct Config {
     /// Maximum characters per context file (SOUL.md, USER.md, AGENTS.md, CONTEXT.md)
     /// before truncation. Increase for large context files. Default: 20_000.
     pub context_file_max_chars: usize,
+
+    /// Vision model for image analysis (e.g. "glm-4.5v", "llava").
+    /// Empty string means use the main model_name (most modern models are multimodal).
+    pub vision_model: String,
 }
 
 impl Default for Config {
@@ -238,6 +247,7 @@ impl Default for Config {
             memory_cache_max_entries: 50_000,
             telegram_enabled: false,
             context_file_max_chars: 20_000,
+            vision_model: String::new(), // Empty = use main model_name
         }
     }
 }
@@ -577,6 +587,15 @@ impl Config {
                     if file_cfg.context_file_max_chars.is_some() {
                         merged.context_file_max_chars = file_cfg.context_file_max_chars;
                     }
+                    if file_cfg.thinking_effort.is_some() {
+                        merged.thinking_effort = file_cfg.thinking_effort;
+                    }
+                    if file_cfg.telegram_enabled.is_some() {
+                        merged.telegram_enabled = file_cfg.telegram_enabled;
+                    }
+                    if file_cfg.vision_model.is_some() {
+                        merged.vision_model = file_cfg.vision_model;
+                    }
                 }
                 Err(e) => {
                     // In explicit mode with a single file, missing file is an error
@@ -872,6 +891,41 @@ impl Config {
             }
         }
 
+        // ── Config migration: add missing fields with defaults to the global config ──
+        // When new config options are added, existing users' home config won't have them.
+        // Compare against the default template and add any missing keys so users
+        // can discover and configure new options.
+        // Only runs on the home config (~/.zapclaw/zapclaw.json) — project configs
+        // are intentionally sparse overrides and should not be modified.
+        if is_home_config {
+        if let Some(obj) = parsed.as_object() {
+            let template_str = Self::default_template_json(path);
+            if let Ok(template_val) = serde_json::from_str::<serde_json::Value>(&template_str) {
+                if let Some(template_obj) = template_val.as_object() {
+                    let mut updated = parsed.clone();
+                    let mut migrated = false;
+
+                    for (key, default_val) in template_obj {
+                        if !obj.contains_key(key) {
+                            updated[key] = default_val.clone();
+                            migrated = true;
+                        }
+                    }
+
+                    if migrated {
+                        if let Ok(pretty) = serde_json::to_string_pretty(&updated) {
+                            if let Err(e) = std::fs::write(path, &pretty) {
+                                log::warn!("Failed to migrate config {}: {}", path.display(), e);
+                            } else {
+                                log::info!("Migrated config {} with new fields", path.display());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        } // is_home_config
+
         // Deserialize into FileConfig
         let file_config: FileConfig = serde_json::from_str(&content)
             .with_context(|| format!("Failed to deserialize config file: {}", path.display()))?;
@@ -995,6 +1049,10 @@ impl Config {
             }
         }
 
+        if let Ok(vm) = std::env::var("ZAPCLAW_VISION_MODEL") {
+            config.vision_model = vm;
+        }
+
         // Telegram enabled only if BOTH env vars are present
         config.telegram_enabled = std::env::var("ZAPCLAW_TELEGRAM_TOKEN").is_ok()
             && std::env::var("ZAPCLAW_TELEGRAM_ALLOWED_IDS").is_ok();
@@ -1085,6 +1143,9 @@ impl Config {
         }
         if let Some(max_chars) = file_cfg.context_file_max_chars {
             config.context_file_max_chars = max_chars;
+        }
+        if let Some(vm) = &file_cfg.vision_model {
+            config.vision_model = vm.clone();
         }
 
         // Apply env config (overrides file and defaults)
@@ -1203,6 +1264,9 @@ impl Config {
                 }
             }
         }
+        if let Ok(vm) = std::env::var("ZAPCLAW_VISION_MODEL") {
+            config.vision_model = vm;
+        }
 
         config
     }
@@ -1250,6 +1314,8 @@ impl Config {
             "memory_allow_lexical_fallback": false,
             "memory_cache_max_entries": 50000,
             "context_file_max_chars": 20000,
+            "vision_model": "",
+            "_comment_vision_model": "Vision model for image analysis. Empty = use main model. Set to a vision-capable model (e.g. glm-4.5v, llava) if your main model lacks vision.",
             "_comment_memory": "Memory system settings for hybrid search (BM25 + vector embeddings)",
             "_comment_memory_setup": "Install Ollama and run: ollama pull nomic-embed-text:v1.5",
         });
@@ -1284,6 +1350,7 @@ impl Config {
             memory_cache_max_entries: Some(self.memory_cache_max_entries),
             telegram_enabled: Some(self.telegram_enabled),
             context_file_max_chars: Some(self.context_file_max_chars),
+            vision_model: if self.vision_model.is_empty() { None } else { Some(self.vision_model.clone()) },
         };
 
         serde_json::to_string_pretty(&file_config)

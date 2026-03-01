@@ -181,86 +181,85 @@ impl AndroidTool {
         let mut buf = Vec::new();
         let mut depth = 0;
 
+        // Extract attributes from a node element (Start or Empty)
+        let extract_node = |e: &quick_xml::events::BytesStart,
+                            nodes: &mut Vec<serde_json::Value>,
+                            bounds_regex: &Regex| {
+            let mut text = String::new();
+            let mut content_desc = String::new();
+            let mut class = String::new();
+            let mut bounds = String::new();
+            let mut clickable = false;
+            let mut scrollable = false;
+
+            for attr in e.attributes() {
+                if let Ok(attr) = attr {
+                    let key = attr.key.as_ref();
+                    let value = attr.value.as_ref();
+
+                    match key {
+                        b"text" => text = std::str::from_utf8(value).unwrap_or("").to_string(),
+                        b"content-desc" => {
+                            content_desc = std::str::from_utf8(value).unwrap_or("").to_string()
+                        }
+                        b"class" => class = std::str::from_utf8(value).unwrap_or("").to_string(),
+                        b"bounds" => {
+                            bounds = std::str::from_utf8(value).unwrap_or("").to_string()
+                        }
+                        b"clickable" => clickable = value == b"true",
+                        b"scrollable" => scrollable = value == b"true",
+                        _ => {}
+                    }
+                }
+            }
+
+            if clickable || scrollable || !text.is_empty() || !content_desc.is_empty() {
+                let simple_type = class
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string();
+
+                let (cx, cy) = if let Some(caps) = bounds_regex.captures(&bounds) {
+                    let x1: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
+                    let y1: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(0);
+                    let x2: u32 = caps.get(3).unwrap().as_str().parse().unwrap_or(0);
+                    let y2: u32 = caps.get(4).unwrap().as_str().parse().unwrap_or(0);
+                    ((x1 + x2) / 2, (y1 + y2) / 2)
+                } else {
+                    (0, 0)
+                };
+
+                let node_id = format!("e{}", nodes.len() + 1);
+
+                nodes.push(serde_json::json!({
+                    "id": node_id,
+                    "text": text,
+                    "desc": content_desc,
+                    "type": simple_type,
+                    "cx": cx,
+                    "cy": cy,
+                    "bounds": bounds,
+                    "clickable": clickable
+                }));
+            }
+        };
+
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
                     depth += 1;
-
-                    // Extract attributes
-                    let mut text = String::new();
-                    let mut content_desc = String::new();
-                    let mut class = String::new();
-                    let mut bounds = String::new();
-                    let mut clickable = false;
-                    let mut scrollable = false;
-
-                    for attr in e.attributes() {
-                        if let Ok(attr) = attr {
-                            let key = attr.key.as_ref();
-                            let value = attr.value.as_ref();
-
-                            match key {
-                                b"text" => text = std::str::from_utf8(value).unwrap_or("").to_string(),
-                                b"content-desc" => {
-                                    content_desc = std::str::from_utf8(value).unwrap_or("").to_string()
-                                }
-                                b"class" => class = std::str::from_utf8(value).unwrap_or("").to_string(),
-                                b"bounds" => {
-                                    bounds = std::str::from_utf8(value).unwrap_or("").to_string()
-                                }
-                                b"clickable" => clickable = value == b"true",
-                                b"scrollable" => scrollable = value == b"true",
-                                _ => {}
-                            }
-                        }
-                    }
-
-                    // Include node if actionable (clickable, scrollable, or has text/desc)
-                    if clickable || scrollable || !text.is_empty() || !content_desc.is_empty() {
-                        // Extract simple class name (last segment)
-                        let simple_type = class
-                            .rsplit('.')
-                            .next()
-                            .unwrap_or("Unknown")
-                            .to_string();
-
-                        // Parse bounds [x1,y1][x2,y2]
-                        let (cx, cy) = if let Some(caps) = bounds_regex.captures(&bounds)
-                        {
-                            let x1: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
-                            let y1: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(0);
-                            let x2: u32 = caps.get(3).unwrap().as_str().parse().unwrap_or(0);
-                            let y2: u32 = caps.get(4).unwrap().as_str().parse().unwrap_or(0);
-                            ((x1 + x2) / 2, (y1 + y2) / 2)
-                        } else {
-                            (0, 0)
-                        };
-
-                        let node_id = format!("e{}", nodes.len() + 1);
-
-                        let node = serde_json::json!({
-                            "id": node_id,
-                            "text": text,
-                            "desc": content_desc,
-                            "type": simple_type,
-                            "cx": cx,
-                            "cy": cy,
-                            "bounds": bounds,
-                            "clickable": clickable
-                        });
-
-                        nodes.push(node);
-
-                        if nodes.len() >= MAX_UI_NODES {
-                            break;
-                        }
-                    }
+                    extract_node(e, &mut nodes, &bounds_regex);
+                    if nodes.len() >= MAX_UI_NODES { break; }
+                }
+                Ok(Event::Empty(ref e)) => {
+                    // Self-closing leaf nodes (buttons, text fields, etc.)
+                    extract_node(e, &mut nodes, &bounds_regex);
+                    if nodes.len() >= MAX_UI_NODES { break; }
                 }
                 Ok(Event::End(_)) => {
                     depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
+                    if depth == 0 { break; }
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => bail!("XML parsing error: {}", e),
@@ -408,7 +407,7 @@ impl Tool for AndroidTool {
         match args {
             AndroidArgs::GetScreen => {
                 let xml = self
-                    .run_adb(&["shell", "uiautomator", "dump", "/dev/tty"])
+                    .run_adb(&["shell", "uiautomator dump /data/local/tmp/ui_dump.xml && cat /data/local/tmp/ui_dump.xml && rm -f /data/local/tmp/ui_dump.xml"])
                     .await?;
                 Ok(self.parse_ui_tree(&xml)?)
             }

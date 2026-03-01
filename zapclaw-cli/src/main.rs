@@ -993,10 +993,15 @@ async fn main() -> Result<()> {
     // Cron/reminders
     tools.register(Arc::new(CronTool::new(&workspace)));
 
-    // Image analysis (uses same API)
+    // Image analysis — use dedicated vision model if configured, otherwise main model
+    let vision_model = if config.vision_model.is_empty() {
+        &config.model_name
+    } else {
+        &config.vision_model
+    };
     tools.register(Arc::new(ImageTool::new(
         &config.api_base_url,
-        &config.model_name,
+        vision_model,
         api_key,
     )));
 
