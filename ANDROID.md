@@ -73,7 +73,8 @@ With the `--enable-android` flag, ZapClaw gains these capabilities:
      "enable_egress_guard": true,
      "memory_embedding_base_url": "http://localhost:11434/v1",
      "memory_embedding_model": "nomic-embed-text:v1.5",
-     "memory_require_embeddings": true
+     "memory_require_embeddings": true,
+     "vision_model": ""
    }
    ```
 

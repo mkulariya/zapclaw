@@ -433,8 +433,9 @@ Options:
 | `ZAPCLAW_API_BASE_URL` | LLM API endpoint (required) | — |
 | `ZAPCLAW_MODEL` | Model identifier (required) | — |
 | `ZAPCLAW_API_KEY` | API key (required for remote endpoints) | — |
-| `ZAPCLAW_MAX_STEPS` | Max loop iterations | `15` |
+| `ZAPCLAW_MAX_STEPS` | Max loop iterations | `100` |
 | `ZAPCLAW_TOOL_TIMEOUT` | Tool timeout (seconds) | `5` |
+| `ZAPCLAW_VISION_MODEL` | Vision model for image analysis (empty = use main model) | — |
 | `ZAPCLAW_SANDBOXED` | Set to `1` when running inside sandbox (auto-set) | — |
 | `ZAPCLAW_INBOUND_KEY` | API key for remote inbound tunnel | — |
 

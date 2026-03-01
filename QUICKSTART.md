@@ -42,9 +42,12 @@ nano ~/.zapclaw/zapclaw.json
   "context_window_tokens": 128000,
   "memory_embedding_base_url": "http://localhost:11434/v1",
   "memory_embedding_model": "nomic-embed-text:v1.5",
-  "memory_require_embeddings": true
+  "memory_require_embeddings": true,
+  "vision_model": ""
 }
 ```
+
+> **`vision_model`**: Leave empty to use the main model for image analysis (most modern models are multimodal). Set to a dedicated vision model (e.g. `glm-4.5v`, `llava`) if your main model lacks vision support.
 
 **For different LLM providers:**
 
@@ -115,7 +118,8 @@ nano ~/.zapclaw/zapclaw.json
   "enable_egress_guard": true,
   "memory_embedding_base_url": "http://localhost:11434/v1",
   "memory_embedding_model": "nomic-embed-text:v1.5",
-  "memory_require_embeddings": true
+  "memory_require_embeddings": true,
+  "vision_model": ""
 }
 ```
 
@@ -316,6 +320,7 @@ zapclaw --no-sandbox
 | `ZAPCLAW_MODEL` | Model name | Always |
 | `ZAPCLAW_API_KEY` | LLM API key | Cloud LLMs only |
 | `ZAPCLAW_SEARCH_API_KEY` | Web search API key | Optional (Brave Search) |
+| `ZAPCLAW_VISION_MODEL` | Vision model for image analysis | Optional (empty = use main model) |
 | `ZAPCLAW_TELEGRAM_TOKEN` | Telegram bot token | Optional (remote control) |
 | `ZAPCLAW_TELEGRAM_ALLOWED_IDS` | Telegram user IDs | Optional (whitelist) |
 | `ZAPCLAW_INBOUND_KEY` | Inbound tunnel API key | Optional (remote access) |

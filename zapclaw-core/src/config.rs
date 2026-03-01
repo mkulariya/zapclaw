@@ -897,34 +897,46 @@ impl Config {
         // can discover and configure new options.
         // Only runs on the home config (~/.zapclaw/zapclaw.json) — project configs
         // are intentionally sparse overrides and should not be modified.
+        // New keys are appended at the bottom to preserve existing key order.
         if is_home_config {
-        if let Some(obj) = parsed.as_object() {
-            let template_str = Self::default_template_json(path);
-            if let Ok(template_val) = serde_json::from_str::<serde_json::Value>(&template_str) {
-                if let Some(template_obj) = template_val.as_object() {
-                    let mut updated = parsed.clone();
-                    let mut migrated = false;
-
-                    for (key, default_val) in template_obj {
-                        if !obj.contains_key(key) {
-                            updated[key] = default_val.clone();
-                            migrated = true;
+            if let Some(obj) = parsed.as_object() {
+                let template_str = Self::default_template_json(path);
+                if let Ok(template_val) = serde_json::from_str::<serde_json::Value>(&template_str) {
+                    if let Some(template_obj) = template_val.as_object() {
+                        // Collect missing keys with their default values
+                        let mut new_entries = Vec::new();
+                        for (key, default_val) in template_obj {
+                            if !obj.contains_key(key) {
+                                new_entries.push((key.clone(), default_val.clone()));
+                            }
                         }
-                    }
 
-                    if migrated {
-                        if let Ok(pretty) = serde_json::to_string_pretty(&updated) {
-                            if let Err(e) = std::fs::write(path, &pretty) {
-                                log::warn!("Failed to migrate config {}: {}", path.display(), e);
-                            } else {
-                                log::info!("Migrated config {} with new fields", path.display());
+                        if !new_entries.is_empty() {
+                            // Append new keys at the bottom of the existing JSON file
+                            // by inserting before the closing '}'
+                            let trimmed = content.trim_end();
+                            if let Some(last_brace) = trimmed.rfind('}') {
+                                let before = trimmed[..last_brace].trim_end();
+                                let mut appended = String::from(before);
+
+                                for (key, val) in &new_entries {
+                                    let val_str = serde_json::to_string(val).unwrap_or_default();
+                                    appended.push_str(",\n  ");
+                                    appended.push_str(&format!("\"{}\": {}", key, val_str));
+                                }
+                                appended.push_str("\n}\n");
+
+                                if let Err(e) = std::fs::write(path, &appended) {
+                                    log::warn!("Failed to migrate config {}: {}", path.display(), e);
+                                } else {
+                                    log::info!("Migrated config {} with new fields", path.display());
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        } // is_home_config
 
         // Deserialize into FileConfig
         let file_config: FileConfig = serde_json::from_str(&content)
@@ -1287,9 +1299,6 @@ impl Config {
     }
 
     /// Generate a default config file template as JSON string.
-    ///
-    /// Includes hints via comments in JSON (using non-standard approach with _comment fields
-    /// that users can remove, or we can provide a separate example file).
     pub fn default_template_json(_workspace_hint: &Path) -> String {
         let template = serde_json::json!({
             "workspace_path": "./zapclaw_workspace",
@@ -1300,9 +1309,6 @@ impl Config {
             "require_confirmation": true,
             "enable_egress_guard": true,
             "context_window_tokens": 128000,
-            "_comment_api_base_url": "For Ollama: http://localhost:11434/v1, For OpenAI: https://api.openai.com/v1",
-            "_comment_model_name": "Ollama: phi3:mini, OpenAI: gpt-4o",
-            "_comment_secrets": "API keys must be set via environment variables: ZAPCLAW_API_KEY, ZAPCLAW_SEARCH_API_KEY, ZAPCLAW_INBOUND_KEY",
             "memory_embedding_base_url": "http://localhost:11434/v1",
             "memory_embedding_model": "nomic-embed-text:v1.5",
             "memory_embedding_target_dims": 512,
@@ -1315,9 +1321,6 @@ impl Config {
             "memory_cache_max_entries": 50000,
             "context_file_max_chars": 20000,
             "vision_model": "",
-            "_comment_vision_model": "Vision model for image analysis. Empty = use main model. Set to a vision-capable model (e.g. glm-4.5v, llava) if your main model lacks vision.",
-            "_comment_memory": "Memory system settings for hybrid search (BM25 + vector embeddings)",
-            "_comment_memory_setup": "Install Ollama and run: ollama pull nomic-embed-text:v1.5",
         });
 
         serde_json::to_string_pretty(&template).unwrap()
@@ -1791,7 +1794,7 @@ mod tests {
         assert!(template.contains("workspace_path"));
         assert!(template.contains("api_base_url"));
         assert!(template.contains("model_name"));
-        assert!(template.contains("_comment_"));
+        assert!(template.contains("vision_model"));
     }
 
     #[test]
