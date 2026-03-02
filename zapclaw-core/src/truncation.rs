@@ -35,6 +35,22 @@ pub fn calculate_max_tool_result_chars(context_window_tokens: usize) -> usize {
     max_chars.min(HARD_MAX_TOOL_RESULT_CHARS)
 }
 
+/// Truncate all tool result messages in a messages array to the proportional
+/// context-window limit. Mirrors OpenClaw's truncateOversizedToolResultsInMessages.
+/// Called before every LLM call to prevent accumulated tool results from
+/// filling the context window.
+pub fn truncate_oversized_tool_results_in_messages(
+    messages: &mut Vec<ChatMessage>,
+    context_window_tokens: usize,
+) {
+    let max_chars = calculate_max_tool_result_chars(context_window_tokens);
+    for msg in messages.iter_mut() {
+        if msg.role == "tool" {
+            msg.content = truncate_tool_result(&msg.content, max_chars);
+        }
+    }
+}
+
 /// Truncate a tool result string to fit within max_chars.
 /// Keeps the head, tries to break at a newline boundary.
 pub fn truncate_tool_result(text: &str, max_chars: usize) -> String {

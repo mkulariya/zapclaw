@@ -1561,6 +1561,13 @@ impl Agent {
                 anyhow::bail!("Agent run cancelled during overflow recovery");
             }
 
+            // Proactively truncate tool results to proportional limit before every LLM call.
+            // Matches OpenClaw's truncateOversizedToolResultsInMessages behaviour.
+            crate::truncation::truncate_oversized_tool_results_in_messages(
+                messages,
+                self.config.context_window_tokens,
+            );
+
             match self.llm.complete(messages, tool_defs).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) if is_context_overflow_error(&e) && attempt < MAX_OVERFLOW_RETRIES => {
@@ -1620,6 +1627,13 @@ impl Agent {
             if self.cancel.load(Ordering::Relaxed) {
                 anyhow::bail!("Agent run cancelled during overflow recovery");
             }
+
+            // Proactively truncate tool results to proportional limit before every LLM call.
+            // Matches OpenClaw's truncateOversizedToolResultsInMessages behaviour.
+            crate::truncation::truncate_oversized_tool_results_in_messages(
+                messages,
+                self.config.context_window_tokens,
+            );
 
             match self.llm.complete_stream(messages, tool_defs, tx.clone()).await {
                 Ok(resp) => return Ok(resp),
