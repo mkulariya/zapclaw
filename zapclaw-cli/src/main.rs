@@ -26,9 +26,34 @@ use zapclaw_tools::session_tool::SessionTool;
 use zapclaw_tools::web_search_tool::WebSearchTool;
 use zapclaw_tunnels::telegram::TelegramListener;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 use std::io::IsTerminal;
 use std::borrow::Cow;
+
+/// When true, log output clears the prompt line and reprints it after the message
+/// so background warnings never corrupt the prompt.
+static REPL_LOG_MODE: AtomicBool = AtomicBool::new(false);
+
+struct CleanLineWriter;
+
+impl std::io::Write for CleanLineWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut stderr = std::io::stderr().lock();
+        if REPL_LOG_MODE.load(Ordering::Relaxed) {
+            std::io::Write::write_all(&mut stderr, b"\r\x1b[2K")?;
+            std::io::Write::write_all(&mut stderr, buf)?;
+            std::io::Write::write_all(&mut stderr, "🦞 ❯ ".as_bytes())?;
+            std::io::Write::flush(&mut stderr)?;
+        } else {
+            std::io::Write::write_all(&mut stderr, buf)?;
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut std::io::stderr().lock())
+    }
+}
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -492,56 +517,110 @@ async fn run_with_streaming(
         }
     });
 
-    // Spawn task to handle streaming output
+    // Spawn task to handle streaming output with spinner animation
     let print_handle = tokio::spawn(async move {
         use std::io::{self, Write};
+        use std::time::Duration;
         let mut stdout = io::stdout();
         // Buffer partial lines; flush + render when a newline arrives
         let mut line_buf = String::new();
 
-        while let Some(chunk) = rx.recv().await {
-            match chunk {
-                StreamChunk::TextDelta(text) => {
-                    line_buf.push_str(&text);
-                    // Flush every complete line with markdown rendering
-                    while let Some(pos) = line_buf.find('\n') {
-                        let line = line_buf[..pos].to_string();
-                        line_buf = line_buf[pos + 1..].to_string();
-                        println!("{}", render_markdown_line(&line));
-                        stdout.flush().ok();
+        // Spinner state
+        const SPINNER_FRAMES: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+        let mut spinner_active = true;
+        let mut frame_idx: usize = 0;
+        let mut current_tool: Option<String> = None;
+
+        loop {
+            tokio::select! {
+                chunk = rx.recv() => {
+                    match chunk {
+                        Some(StreamChunk::TextDelta(text)) => {
+                            if spinner_active {
+                                print!("\r\x1b[2K"); // clear spinner line
+                                spinner_active = false;
+                            }
+                            line_buf.push_str(&text);
+                            // Flush every complete line with markdown rendering
+                            while let Some(pos) = line_buf.find('\n') {
+                                let raw_line = line_buf[..pos].to_string();
+                                line_buf = line_buf[pos + 1..].to_string();
+                                // Strip reasoning format tags
+                                let line = raw_line
+                                    .replace("<final>", "")
+                                    .replace("</final>", "");
+                                if !line.trim().is_empty() {
+                                    println!("{}", render_markdown_line(&line));
+                                    stdout.flush().ok();
+                                }
+                            }
+                        }
+                        Some(StreamChunk::ToolCallDelta { .. }) => {
+                            // Tool calls are handled silently, final output will show results
+                        }
+                        Some(StreamChunk::ToolStart { name, .. }) => {
+                            if spinner_active {
+                                print!("\r\x1b[2K");
+                            }
+                            current_tool = Some(name);
+                            spinner_active = true;
+                            // First frame drawn on next tick
+                        }
+                        Some(StreamChunk::ToolEnd { is_error, .. }) => {
+                            print!("\r\x1b[2K");
+                            if let Some(ref tool_name) = current_tool {
+                                if is_error {
+                                    println!("  \x1b[31m✗\x1b[0m {}", tool_name);
+                                } else {
+                                    println!("  \x1b[32m✓\x1b[0m {}", tool_name);
+                                }
+                            }
+                            current_tool = None;
+                            spinner_active = true; // resume waiting spinner
+                        }
+                        Some(StreamChunk::ReasoningDelta(_)) => {
+                            // Internal reasoning — not displayed
+                            // Keep spinner active to show the agent is thinking
+                        }
+                        Some(StreamChunk::LifecycleEvent { phase }) if phase == "cancelled" => {
+                            if spinner_active {
+                                print!("\r\x1b[2K");
+                            }
+                            println!("\n[Run cancelled]");
+                            break;
+                        }
+                        Some(StreamChunk::LifecycleEvent { .. }) => {
+                            // Other lifecycle events — silent for now
+                        }
+                        Some(StreamChunk::Done(_)) => {
+                            if spinner_active {
+                                print!("\r\x1b[2K");
+                            }
+                            // Flush any remaining partial line
+                            if !line_buf.is_empty() {
+                                let line = line_buf
+                                    .replace("<final>", "")
+                                    .replace("</final>", "");
+                                if !line.trim().is_empty() {
+                                    print!("{}", render_markdown_line(&line));
+                                    stdout.flush().ok();
+                                }
+                            }
+                            println!();
+                            break;
+                        }
+                        None => break, // channel closed
                     }
                 }
-                StreamChunk::ToolCallDelta { .. } => {
-                    // Tool calls are handled silently, final output will show results
-                }
-                StreamChunk::ToolStart { name, .. } => {
-                    print!("  [Running {}...", name);
-                    stdout.flush().ok();
-                }
-                StreamChunk::ToolEnd { is_error, .. } => {
-                    if is_error {
-                        println!(" ERROR]");
+                _ = tokio::time::sleep(Duration::from_millis(80)), if spinner_active => {
+                    frame_idx += 1;
+                    let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
+                    if let Some(ref tool_name) = current_tool {
+                        print!("\r\x1b[2K  \x1b[2m{} {}\x1b[0m", frame, tool_name);
                     } else {
-                        println!(" done]");
+                        print!("\r\x1b[2m🦞 {}\x1b[0m", frame);
                     }
-                }
-                StreamChunk::ReasoningDelta(_) => {
-                    // Internal reasoning — not displayed
-                }
-                StreamChunk::LifecycleEvent { phase } if phase == "cancelled" => {
-                    println!("\n[Run cancelled]");
-                }
-                StreamChunk::LifecycleEvent { .. } => {
-                    // Other lifecycle events — silent for now
-                }
-                StreamChunk::Done(_) => {
-                    // Flush any remaining partial line, then stop
-                    if !line_buf.is_empty() {
-                        print!("{}", render_markdown_line(&line_buf));
-                        stdout.flush().ok();
-                    }
-                    println!();
-                    break;
+                    stdout.flush().ok();
                 }
             }
         }
@@ -697,9 +776,11 @@ async fn main() -> Result<()> {
     // Load .env files first — before env_logger (RUST_LOG) and Cli::parse() (env = "...")
     load_dotenv();
 
-    // Initialize logging
+    // Initialize logging with CleanLineWriter so background log messages
+    // don't corrupt the REPL prompt line.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
+        .target(env_logger::Target::Pipe(Box::new(CleanLineWriter)))
         .init();
 
     let cli = Cli::parse();
@@ -1209,6 +1290,9 @@ async fn main() -> Result<()> {
         use std::io::Write;
         let _ = std::io::stdout().flush();
     }
+
+    // Enable clean log mode — background logs will clear/reprint the prompt.
+    REPL_LOG_MODE.store(true, Ordering::Relaxed);
 
     loop {
         let readline = rl.readline("🦞 ❯ ");
