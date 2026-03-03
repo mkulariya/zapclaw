@@ -99,6 +99,10 @@ pub struct MemoryDaemon {
     /// not yet re-generated. `can_use_embeddings()` returns `false` while
     /// this flag is set so callers fall back to lexical search consistently.
     reindexing: Arc<AtomicBool>,
+    /// Cached health state — updated by the daemon loop after each sync.
+    /// `true` if the last sync+embed succeeded, `false` if it failed.
+    /// Replaces the old live-probe approach in `can_use_embeddings()`.
+    embeddings_healthy: Arc<AtomicBool>,
     /// Notification for sync coalescing — multiple rapid file changes
     /// trigger at most one extra sync (not N). Held here to keep the Arc
     /// alive alongside the background watcher task.
@@ -145,6 +149,7 @@ impl MemoryDaemon {
                 command_tx,
                 _handle: handle,
                 reindexing: Arc::new(AtomicBool::new(false)),
+                embeddings_healthy: Arc::new(AtomicBool::new(false)),
                 sync_notify,
             });
         }
@@ -156,11 +161,12 @@ impl MemoryDaemon {
             daemon_config.target_dims
         );
 
-        // Create embedding provider for verification
-        let provider = daemon_config.create_provider();
+        // Create a single shared embedding provider — reused for all syncs.
+        // reqwest::Client is Arc-wrapped internally, so cloning is cheap.
+        let shared_provider = daemon_config.create_provider();
 
         // Verify Ollama is reachable (with retry)
-        Self::verify_ollama_reachable(&provider, daemon_config.require_embeddings, daemon_config.allow_lexical_fallback).await?;
+        Self::verify_ollama_reachable(&shared_provider, daemon_config.require_embeddings, daemon_config.allow_lexical_fallback).await?;
 
         // Create command channel
         let (command_tx, mut command_rx) = mpsc::channel::<DaemonCommand>(16);
@@ -169,71 +175,138 @@ impl MemoryDaemon {
         // so callers can fall back to lexical search during the empty-embeddings window.
         let reindexing = Arc::new(AtomicBool::new(false));
 
+        // Cached health state — starts false, set true only after a successful sync.
+        let embeddings_healthy = Arc::new(AtomicBool::new(false));
+
+        // Sync overlap guard — prevents concurrent syncs from piling up.
+        // Starts true because the initial sync spawn below holds it.
+        let is_syncing = Arc::new(AtomicBool::new(true));
+
         // Sync coalescing: Arc<Notify> for watcher-triggered syncs.
         // Multiple notify_one() calls before notified().await = exactly 1 wakeup.
         let sync_notify = Arc::new(tokio::sync::Notify::new());
 
         // Check if reindex is needed before initial sync
-        let needs_reindex = {
-            let provider = daemon_config.create_provider();
-            memory.needs_full_reindex(&provider.model(), provider.target_dims())
-                .unwrap_or(false)
-        };
+        let needs_reindex = memory.needs_full_reindex(shared_provider.model(), shared_provider.target_dims())
+            .unwrap_or(false);
 
-        // Initial sync/embed (with reindex if needed)
+        // Initial sync/embed (with reindex if needed).
+        // is_syncing is already true — released when this task completes.
         let memory_clone = Arc::clone(&memory);
-        let config_clone = daemon_config.clone();
+        let init_provider = shared_provider.clone();
         let reindexing_init = Arc::clone(&reindexing);
+        let healthy_init = Arc::clone(&embeddings_healthy);
+        let is_syncing_init = Arc::clone(&is_syncing);
         tokio::spawn(async move {
-            if needs_reindex {
+            let result = if needs_reindex {
                 log::warn!("Config changed, forcing full reindex...");
-                let provider = config_clone.create_provider();
-                if let Err(e) = Self::execute_force_reindex(&memory_clone, &provider, &reindexing_init).await {
-                    log::error!("Forced reindex failed: {}", e);
-                }
+                Self::execute_force_reindex(&memory_clone, &init_provider, &reindexing_init).await
+                    .map(|_| ())
             } else {
-                Self::initial_sync(memory_clone, &config_clone).await;
+                Self::initial_sync(memory_clone, &init_provider).await
+            };
+            match result {
+                Ok(()) => healthy_init.store(true, Ordering::Relaxed),
+                Err(e) => {
+                    log::error!("Initial sync failed: {}", e);
+                    healthy_init.store(false, Ordering::Relaxed);
+                }
             }
+            is_syncing_init.store(false, Ordering::Release);
         });
 
         // Spawn daemon loop
         let memory_loop = memory.clone();
-        let config_loop = daemon_config.clone();
         let interval_secs = daemon_config.sync_interval_secs;
+        let loop_provider = shared_provider.clone();
         let reindexing_loop = Arc::clone(&reindexing);
         let sync_notify_loop = Arc::clone(&sync_notify);
+        let is_syncing_loop = Arc::clone(&is_syncing);
+        let healthy_loop = Arc::clone(&embeddings_healthy);
         let handle = tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(Duration::from_secs(interval_secs as u64));
+            // Prevent burst ticks after a long sync — next tick fires interval
+            // seconds after the previous tick *completes*, not from schedule.
+            interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval_timer.tick().await; // skip first tick (we just did initial sync)
 
             loop {
                 tokio::select! {
                     // Periodic sync
                     _ = interval_timer.tick() => {
-                        let provider = config_loop.create_provider();
-                        if let Err(e) = Self::sync_and_embed(&memory_loop, &provider).await {
-                            log::warn!("Periodic sync failed: {}", e);
+                        if is_syncing_loop.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                            log::debug!("Skipping periodic sync — previous sync still in progress");
+                            continue;
                         }
+                        let start = std::time::Instant::now();
+                        match Self::sync_and_embed(&memory_loop, &loop_provider).await {
+                            Ok(()) => {
+                                log::debug!("Periodic sync completed in {:.1}s", start.elapsed().as_secs_f64());
+                                healthy_loop.store(true, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                log::warn!("Periodic sync failed after {:.1}s: {}", start.elapsed().as_secs_f64(), e);
+                                healthy_loop.store(false, Ordering::Relaxed);
+                            }
+                        }
+                        is_syncing_loop.store(false, Ordering::Release);
                     }
                     // Coalesced sync from filesystem watcher
                     _ = sync_notify_loop.notified() => {
-                        let provider = config_loop.create_provider();
-                        if let Err(e) = Self::sync_and_embed(&memory_loop, &provider).await {
-                            log::warn!("Watcher-triggered sync failed: {}", e);
+                        if is_syncing_loop.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                            log::debug!("Skipping watcher-triggered sync — previous sync still in progress");
+                            continue;
                         }
+                        let start = std::time::Instant::now();
+                        match Self::sync_and_embed(&memory_loop, &loop_provider).await {
+                            Ok(()) => {
+                                log::debug!("Watcher-triggered sync completed in {:.1}s", start.elapsed().as_secs_f64());
+                                healthy_loop.store(true, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                log::warn!("Watcher-triggered sync failed after {:.1}s: {}", start.elapsed().as_secs_f64(), e);
+                                healthy_loop.store(false, Ordering::Relaxed);
+                            }
+                        }
+                        is_syncing_loop.store(false, Ordering::Release);
                     }
                     // Commands
                     Some(cmd) = command_rx.recv() => {
                         match cmd {
                             DaemonCommand::SyncNow { respond_to } => {
-                                let provider = config_loop.create_provider();
-                                let result = Self::sync_and_embed(&memory_loop, &provider).await;
-                                let status = Self::get_sync_status(&*memory_loop);
-                                let _ = respond_to.send(result.map(|_| status));
+                                // If a sync is already in progress (e.g. initial sync),
+                                // return current status instead of overlapping.
+                                if is_syncing_loop.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                                    log::debug!("SyncNow: another sync in progress, returning current status");
+                                    let status = Self::get_sync_status(&*memory_loop);
+                                    let _ = respond_to.send(Ok(status));
+                                } else {
+                                    let start = std::time::Instant::now();
+                                    let result = Self::sync_and_embed(&memory_loop, &loop_provider).await;
+                                    match &result {
+                                        Ok(()) => {
+                                            log::debug!("Manual sync completed in {:.1}s", start.elapsed().as_secs_f64());
+                                            healthy_loop.store(true, Ordering::Relaxed);
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Manual sync failed after {:.1}s: {}", start.elapsed().as_secs_f64(), e);
+                                            healthy_loop.store(false, Ordering::Relaxed);
+                                        }
+                                    }
+                                    is_syncing_loop.store(false, Ordering::Release);
+                                    let status = Self::get_sync_status(&*memory_loop);
+                                    let _ = respond_to.send(result.map(|_| status));
+                                }
                             }
                             DaemonCommand::ForceReindex { respond_to } => {
-                                let provider = config_loop.create_provider();
-                                let result = Self::execute_force_reindex(&memory_loop, &provider, &reindexing_loop).await;
+                                // ForceReindex is an explicit destructive command — wait
+                                // for any in-progress sync to finish by acquiring the guard.
+                                while is_syncing_loop.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
+                                let result = Self::execute_force_reindex(&memory_loop, &loop_provider, &reindexing_loop).await;
+                                healthy_loop.store(result.is_ok(), Ordering::Relaxed);
+                                is_syncing_loop.store(false, Ordering::Release);
                                 let _ = respond_to.send(result);
                             }
                             DaemonCommand::Shutdown { respond_to } => {
@@ -262,6 +335,7 @@ impl MemoryDaemon {
             command_tx,
             _handle: handle,
             reindexing,
+            embeddings_healthy,
             sync_notify,
         })
     }
@@ -347,12 +421,12 @@ impl MemoryDaemon {
         require_embeddings: bool,
         allow_lexical_fallback: bool,
     ) -> Result<()> {
-        const MAX_RETRIES: usize = 5;
-        const RETRY_DELAY_SECS: u64 = 2;
+        const MAX_RETRIES: usize = 3;
+        const RETRY_DELAY_SECS: u64 = 3;
 
         for attempt in 1..=MAX_RETRIES {
             match tokio::time::timeout(
-                Duration::from_secs(5),
+                Duration::from_secs(30),
                 provider.embed_query("test"),
             ).await {
                 Ok(Ok(_)) => {
@@ -440,11 +514,10 @@ impl MemoryDaemon {
     }
 
     /// Perform initial sync on daemon startup.
-    async fn initial_sync(memory: Arc<MemoryDb>, config: &DaemonConfig) {
+    async fn initial_sync(memory: Arc<MemoryDb>, provider: &crate::memory::EmbeddingProvider) -> Result<()> {
         log::info!("Performing initial memory sync...");
 
         let start = std::time::Instant::now();
-        let provider = config.create_provider();
 
         // Sync regular memory files
         let model = provider.model().to_string();
@@ -473,15 +546,11 @@ impl MemoryDaemon {
         }
 
         // Embed chunks
-        match memory.embed_all_chunks(&provider).await {
-            Ok(embedded) => {
-                let elapsed = start.elapsed().as_secs_f64();
-                log::debug!("Initial sync completed in {:.2}s ({} chunks embedded)", elapsed, embedded);
-            }
-            Err(e) => {
-                log::error!("Initial embed failed: {}", e);
-            }
-        }
+        let embedded = memory.embed_all_chunks(provider).await?;
+        let elapsed = start.elapsed().as_secs_f64();
+        log::debug!("Initial sync completed in {:.1}s ({} chunks embedded)", elapsed, embedded);
+
+        Ok(())
     }
 
     /// Sync and embed all memory chunks.
@@ -690,12 +759,8 @@ impl MemoryDaemon {
         status.embedded_chunks > 0
     }
 
-    /// Check if embeddings are available or if Ollama is reachable for new embeddings.
-    /// This checks both existing embedded chunks AND current Ollama reachability.
-    /// Returns true if a forced reindex is currently in progress.
-    ///
-    /// During reindex, embeddings are cleared and not yet regenerated — callers
-    /// should use lexical-only search until this returns false.
+    /// Check if embeddings are available based on the daemon's cached health state.
+    /// Returns `false` during reindex or if the last sync failed.
     pub fn is_reindexing(&self) -> bool {
         self.reindexing.load(Ordering::Relaxed)
     }
@@ -711,35 +776,8 @@ impl MemoryDaemon {
             return false;
         }
 
-        // If we already have embedded chunks, that's good enough for now
-        let status = Self::get_sync_status(&*self.memory);
-        if status.embedded_chunks > 0 {
-            return true;
-        }
-
-        // Otherwise, verify Ollama is actually reachable right now
-        let provider = self.config.create_provider();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match tokio::time::timeout(
-                    Duration::from_secs(2),
-                    provider.embed_query("test"),
-                ).await {
-                    Ok(Ok(_)) => {
-                        log::debug!("Ollama is reachable, enabling hybrid search");
-                        true
-                    },
-                    Ok(Err(e)) => {
-                        log::warn!("Ollama query failed: {}, disabling hybrid search", e);
-                        false
-                    },
-                    Err(_) => {
-                        log::warn!("Ollama timeout, disabling hybrid search");
-                        false
-                    },
-                }
-            })
-        })
+        // Trust the daemon loop's cached health state — no live probe.
+        self.embeddings_healthy.load(Ordering::Relaxed)
     }
 
     /// Shutdown daemon gracefully.

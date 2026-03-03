@@ -451,6 +451,7 @@ fn project_matryoshka(vec: &[f32], target_dims: usize) -> Result<Vec<f32>> {
 
 /// Embedding provider — calls OpenAI-compatible /embeddings endpoint.
 /// Matches OpenClaw's embedding provider interface with Matryoshka projection support.
+#[derive(Clone)]
 pub struct EmbeddingProvider {
     client: reqwest::Client,
     base_url: String,
@@ -462,7 +463,8 @@ pub struct EmbeddingProvider {
 impl EmbeddingProvider {
     pub fn new(base_url: &str, model: &str, api_key: Option<String>, target_dims: usize) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(1200))
             .build()
             .expect("Failed to build embedding HTTP client");
         Self {

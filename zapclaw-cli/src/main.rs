@@ -1043,28 +1043,19 @@ async fn main() -> Result<()> {
     tools.register(Arc::new(FindTool::new(confiner.clone())));
     tools.register(Arc::new(PatchTool::new(confiner.clone())));
 
-    // Memory tools - use hybrid search only if daemon can use embeddings
-    // This respects allow_lexical_fallback: checks both existing embeddings AND Ollama reachability
-    let use_hybrid_search = if let Some((ref daemon, _)) = daemon_handle {
-        daemon.can_use_embeddings()
+    // Memory tools - always register with provider when daemon is enabled.
+    // search_hybrid handles embed failures gracefully at runtime (falls back
+    // to keyword-only when require_embeddings=false).
+    if let Some((_, ref provider)) = daemon_handle {
+        tools.register(Arc::new(
+            zapclaw_tools::memory_tool::MemorySearchTool::with_provider(
+                memory.clone(),
+                provider.clone(),
+                config.memory_sync_on_search,
+                config.memory_require_embeddings,
+            )
+        ));
     } else {
-        false
-    };
-
-    if use_hybrid_search {
-        if let Some((_, ref provider)) = daemon_handle {
-            tools.register(Arc::new(
-                zapclaw_tools::memory_tool::MemorySearchTool::with_provider(
-                    memory.clone(),
-                    provider.clone(),
-                    config.memory_sync_on_search,
-                    config.memory_require_embeddings,
-                )
-            ));
-        }
-    } else {
-        // Lexical-only mode (either daemon disabled, no embeddings, or Ollama down with fallback allowed)
-        log::info!("Memory search running in lexical-only mode (hybrid search disabled)");
         tools.register(Arc::new(
             zapclaw_tools::memory_tool::MemorySearchTool::new(memory.clone())
         ));
