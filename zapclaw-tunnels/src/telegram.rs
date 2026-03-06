@@ -83,6 +83,9 @@ pub struct TelegramListener {
     state_path: PathBuf,
     state: Arc<Mutex<TelegramState>>,
     active_tasks: Arc<Mutex<HashMap<i64, usize>>>,
+    /// Per-chat-id session UUID map. Populated lazily on first message.
+    /// On process restart this map is empty, so all users get fresh sessions.
+    session_map: Arc<Mutex<HashMap<i64, String>>>,
 }
 
 impl TelegramListener {
@@ -120,6 +123,7 @@ impl TelegramListener {
             state_path,
             state: Arc::new(Mutex::new(state)),
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
+            session_map: Arc::new(Mutex::new(HashMap::new())),
         })
     }
     
@@ -176,6 +180,17 @@ impl TelegramListener {
                     continue;
                 }
                 
+                let chat_id = message.chat.id;
+
+                // /reset — clear session so next message starts fresh.
+                // Handled before rate limiting to avoid incrementing active task counter.
+                if message.text.as_deref().map(|t| t.trim()) == Some("/reset") {
+                    self.session_map.lock().await.remove(&chat_id);
+                    self.send_message(chat_id, "Session reset. Next message starts a fresh session.").await.ok();
+                    self.save_state(update.update_id).await?;
+                    continue;
+                }
+
                 // Check rate limit WITHOUT holding lock across await
                 let is_busy = {
                     let mut active = self.active_tasks.lock().await;
@@ -187,31 +202,38 @@ impl TelegramListener {
                         false
                     }
                 };
-                
-                let chat_id = message.chat.id;
-                
+
                 if is_busy {
                     // Lock already released after is_busy block
                     self.send_message(
                         chat_id,
                         "⏳ Previous task still running. Please wait."
                     ).await.ok();
-                    
+
                     self.save_state(update.update_id).await?;
                     continue;
                 }
-                
+
                 // Clone text to own the data
                 let text = message.text.clone().unwrap_or_default();
-                
+
+                // Resolve (or create) a stable UUID session_id for this chat_id.
+                // The map is populated lazily; on restart all chats get fresh sessions.
+                let session_id: String = {
+                    let mut map = self.session_map.lock().await;
+                    map.entry(chat_id)
+                        .or_insert_with(|| uuid::Uuid::new_v4().to_string())
+                        .clone()
+                };
+
                 let agent = self.agent.clone();
                 let active_tasks = self.active_tasks.clone();
                 let client = self.client.clone();
                 let token = self.token.clone();
-                
+
                 // Send response back to user
                 tokio::spawn(async move {
-                    let result = agent.run(&chat_id.to_string(), &text).await;
+                    let result = agent.run(&session_id, &text).await;
                     
                     // Decrement active task count
                     {

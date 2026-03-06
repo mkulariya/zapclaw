@@ -79,6 +79,10 @@ impl SessionStore {
         self.sessions_dir().join(format!("{}.jsonl", session_id))
     }
 
+    fn raw_session_file(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(format!("{}_raw.jsonl", session_id))
+    }
+
     fn meta_file(&self) -> PathBuf {
         self.sessions_dir().join("sessions.json")
     }
@@ -122,25 +126,38 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Append a transcript entry to the session JSONL file.
+    /// Append a transcript entry to the session JSONL file and the raw archive.
     pub fn append_entry(&self, session_id: &str, entry: &TranscriptEntry) -> Result<()> {
         use std::io::Write;
         self.ensure_dir()?;
         let path = self.session_file(session_id);
+        let raw_path = self.raw_session_file(session_id);
         let line = serde_json::to_string(entry)? + "\n";
         let lock = self.session_lock(session_id);
         let _guard = lock.lock().unwrap();
+
+        // Write to active JSONL (may be rewritten by compaction)
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)?;
         file.write_all(line.as_bytes())?;
+
+        // Write to raw archive (append-only, never rewritten by compaction)
+        let mut raw_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&raw_path)?;
+        raw_file.write_all(line.as_bytes())?;
+
         Ok(())
     }
 
     /// Rewrite the session JSONL file with a new set of messages, preserving the header entry.
     ///
     /// Used after conversation compaction to persist the compacted history.
+    /// NOTE: intentionally does NOT touch raw_session_file — the raw archive
+    /// is append-only and must not be rewritten during compaction.
     pub fn rewrite_session_messages(&self, session_id: &str, messages: &[ChatMessage]) -> Result<()> {
         use std::io::Write;
         let lock = self.session_lock(session_id);

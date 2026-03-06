@@ -1310,6 +1310,13 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // /reset — start a fresh session (same as restarting ZapClaw)
+                if input == "/reset" {
+                    session_id = uuid::Uuid::new_v4().to_string();
+                    println!("Session reset. New session: {}", &session_id[..8]);
+                    continue;
+                }
+
                 // /compact — compact the current session's conversation history
                 if input == "/compact" {
                     match agent.compact_session(&session_id).await {
@@ -1872,6 +1879,7 @@ static SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/status",      "Show session info (memory, tokens, session ID)"),
     ("/confirm",     "Show or change confirmation mode"),
     ("/compact",     "Compact conversation history (LLM summarisation)"),
+    ("/reset",       "Start a fresh session"),
     ("/thinking",    "Show or change adaptive thinking effort (low/medium/high/off)"),
     ("/resume",      "List or resume a previous session"),
     ("/update",      "Self-update ZapClaw from git"),
@@ -1998,6 +2006,7 @@ fn print_help() {
     /status       Show session info (memory, tokens, session ID)
     /confirm      Show or change confirmation mode (ask/allow/deny)
     /compact          Compact conversation history (LLM summarisation)
+    /reset            Start a fresh session (same as restarting)
     /thinking         Show or change thinking effort (low/medium/high/off)
     /resume           List recent sessions
     /resume <id>      Resume a specific session

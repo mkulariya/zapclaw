@@ -4,7 +4,6 @@ use zapclaw_core::agent::Tool;
 use zapclaw_core::confiner::Confiner;
 use serde::Deserialize;
 use std::sync::Arc;
-use crate::confirmation::confirm_action;
 
 /// Workspace-confined file operations tool.
 ///
@@ -49,33 +48,6 @@ impl FileTool {
             }
         }
 
-        // -- preview + confirmation --
-        let existing_note = if validated.exists() {
-            let existing_len = std::fs::metadata(&validated).map(|m| m.len()).unwrap_or(0);
-            format!("  \x1b[33mOVERWRITING\x1b[0m existing file ({} bytes)\n", existing_len)
-        } else {
-            String::new()
-        };
-        let preview = if content.len() > 400 {
-            format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &content[..content.floor_char_boundary(400)], content.len())
-        } else {
-            content.to_string()
-        };
-        println!("\n\x1b[1m📝  Write Confirmation\x1b[0m");
-        println!("────────────────────────────────────────────────────");
-        println!("  File:    {}", path);
-        println!("  Size:    {} bytes", content.len());
-        if !existing_note.is_empty() { print!("{}", existing_note); }
-        println!("  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─");
-        for line in preview.lines().take(20) {
-            println!("  {}", line);
-        }
-        println!("────────────────────────────────────────────────────");
-        if !confirm_action("file_ops/write", path) {
-            anyhow::bail!("Write to '{}' denied by user.", path);
-        }
-        // -- end confirmation --
-
         std::fs::write(&validated, content)
             .with_context(|| format!("Failed to write file: {}", validated.display()))?;
 
@@ -84,26 +56,6 @@ impl FileTool {
 
     fn do_append(&self, path: &str, content: &str) -> Result<String> {
         let validated = self.confiner.validate_file(std::path::Path::new(path))?;
-
-        // -- preview + confirmation --
-        let preview = if content.len() > 400 {
-            format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &content[..content.floor_char_boundary(400)], content.len())
-        } else {
-            content.to_string()
-        };
-        println!("\n\x1b[1m📝  Append Confirmation\x1b[0m");
-        println!("────────────────────────────────────────────────────");
-        println!("  File:    {}", path);
-        println!("  Adding:  {} bytes", content.len());
-        println!("  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─");
-        for line in preview.lines().take(20) {
-            println!("  {}", line);
-        }
-        println!("────────────────────────────────────────────────────");
-        if !confirm_action("file_ops/append", path) {
-            anyhow::bail!("Append to '{}' denied by user.", path);
-        }
-        // -- end confirmation --
 
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
@@ -158,7 +110,65 @@ impl Tool for FileTool {
     }
 
     fn requires_confirmation(&self) -> bool {
-        false // File ops within workspace are safe
+        false // read/list don't need confirmation
+    }
+
+    fn requires_confirmation_for_args(&self, arguments: &str) -> bool {
+        // write and append modify files — require confirmation
+        serde_json::from_str::<FileArgs>(arguments)
+            .map(|args| matches!(args.operation.as_str(), "write" | "append"))
+            .unwrap_or(false)
+    }
+
+    fn confirmation_display(&self, arguments: &str) -> Option<String> {
+        let args: FileArgs = serde_json::from_str(arguments).ok()?;
+        match args.operation.as_str() {
+            "write" => {
+                let validated = self.confiner.validate_file(std::path::Path::new(&args.path)).ok()?;
+                let existing_note = if validated.exists() {
+                    let existing_len = std::fs::metadata(&validated).map(|m| m.len()).unwrap_or(0);
+                    format!("  \x1b[33mOVERWRITING\x1b[0m existing file ({} bytes)\n", existing_len)
+                } else {
+                    String::new()
+                };
+                let preview = if args.content.len() > 400 {
+                    format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &args.content[..args.content.floor_char_boundary(400)], args.content.len())
+                } else {
+                    args.content.clone()
+                };
+                let mut display = String::new();
+                display.push_str("\n\x1b[1m📝  Write Confirmation\x1b[0m\n");
+                display.push_str("────────────────────────────────────────────────────\n");
+                display.push_str(&format!("  File:    {}\n", args.path));
+                display.push_str(&format!("  Size:    {} bytes\n", args.content.len()));
+                if !existing_note.is_empty() { display.push_str(&existing_note); }
+                display.push_str("  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─\n");
+                for line in preview.lines().take(20) {
+                    display.push_str(&format!("  {}\n", line));
+                }
+                display.push_str("────────────────────────────────────────────────────");
+                Some(display)
+            }
+            "append" => {
+                let preview = if args.content.len() > 400 {
+                    format!("{}\x1b[2m... ({} bytes total)\x1b[0m", &args.content[..args.content.floor_char_boundary(400)], args.content.len())
+                } else {
+                    args.content.clone()
+                };
+                let mut display = String::new();
+                display.push_str("\n\x1b[1m📝  Append Confirmation\x1b[0m\n");
+                display.push_str("────────────────────────────────────────────────────\n");
+                display.push_str(&format!("  File:    {}\n", args.path));
+                display.push_str(&format!("  Adding:  {} bytes\n", args.content.len()));
+                display.push_str("  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─\n");
+                for line in preview.lines().take(20) {
+                    display.push_str(&format!("  {}\n", line));
+                }
+                display.push_str("────────────────────────────────────────────────────");
+                Some(display)
+            }
+            _ => None,
+        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

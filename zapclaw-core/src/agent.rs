@@ -25,11 +25,20 @@ const SINGLE_PASS_TOKEN_THRESHOLD: usize = 6_000;
 /// Interactive confirmation prompt for CLI.
 ///
 /// This is used by ConfirmationMode::Ask to get user approval.
-fn confirm_action_default(tool_name: &str, description: &str) -> bool {
-    println!("\n🔒 ─── Confirmation Required ───────────────────────");
-    println!("  Tool: {}", tool_name);
-    println!("  Action: {}", description);
-    println!("────────────────────────────────────────────────────");
+/// Interactive confirmation prompt for CLI.
+///
+/// If `rich_display` is provided (from `Tool::confirmation_display`), it is
+/// printed as-is followed by the y/N prompt. Otherwise, falls back to the
+/// generic tool-name + description format.
+fn confirm_action_default(tool_name: &str, description: &str, rich_display: Option<&str>) -> bool {
+    if let Some(display) = rich_display {
+        println!("{}", display);
+    } else {
+        println!("\n🔒 ─── Confirmation Required ───────────────────────");
+        println!("  Tool: {}", tool_name);
+        println!("  Action: {}", description);
+        println!("────────────────────────────────────────────────────");
+    }
     print!("  Proceed? [y/N]: ");
     io::stdout().flush().unwrap();
 
@@ -60,6 +69,21 @@ pub trait Tool: Send + Sync {
 
     /// Whether this tool requires human confirmation before execution.
     fn requires_confirmation(&self) -> bool;
+
+    /// Whether this specific invocation requires confirmation.
+    /// Override for tools where only some operations need confirmation.
+    /// Default: delegates to `requires_confirmation()`.
+    fn requires_confirmation_for_args(&self, _arguments: &str) -> bool {
+        self.requires_confirmation()
+    }
+
+    /// Rich confirmation preview shown to the user before approval.
+    /// Override to provide tool-specific context (file path, diff, content preview)
+    /// instead of the default raw JSON args display.
+    /// Return `None` to fall back to the generic args preview.
+    fn confirmation_display(&self, _arguments: &str) -> Option<String> {
+        None
+    }
 
     /// Get the JSON schema for this tool's parameters.
     fn parameters_schema(&self) -> serde_json::Value;
@@ -623,7 +647,12 @@ impl Agent {
                         remaining
                     );
                     self.flush_session_to_memory(&messages).await;
-                    self.compact_conversation_history(&mut messages, session_id).await;
+                    if self.compact_conversation_history(&mut messages, session_id).await {
+                        if let Some(ref store) = self.session_store {
+                            let to_save: Vec<ChatMessage> = messages.iter().skip(1).cloned().collect();
+                            store.rewrite_session_messages(session_id, &to_save).ok();
+                        }
+                    }
                 }
             }
 
@@ -885,7 +914,12 @@ impl Agent {
                         remaining
                     );
                     self.flush_session_to_memory(&messages).await;
-                    self.compact_conversation_history(&mut messages, session_id).await;
+                    if self.compact_conversation_history(&mut messages, session_id).await {
+                        if let Some(ref store) = self.session_store {
+                            let to_save: Vec<ChatMessage> = messages.iter().skip(1).cloned().collect();
+                            store.rewrite_session_messages(session_id, &to_save).ok();
+                        }
+                    }
                 }
             }
 
@@ -1136,21 +1170,26 @@ impl Agent {
         // Check if confirmation is required
         // Skip normal confirmation if egress guard already confirmed (medium-risk case)
         let needs_confirmation = !egress_guard_confirmed &&
-            (tool.requires_confirmation() || self.config.require_confirmation);
+            (tool.requires_confirmation_for_args(&tool_call.function.arguments) || self.config.require_confirmation);
 
         if needs_confirmation {
-            // Show args preview (head + tail for security)
+            // Get tool's rich preview if available
             let args = &tool_call.function.arguments;
-            let preview = if args.len() > 300 {
-                format!("{}...{}", &args[..args.floor_char_boundary(150)], &args[args.ceil_char_boundary(args.len()-150)..])
+            let rich_display = tool.confirmation_display(args);
+            let fallback_preview = if rich_display.is_none() {
+                if args.len() > 300 {
+                    format!("{}...{}", &args[..args.floor_char_boundary(150)], &args[args.ceil_char_boundary(args.len()-150)..])
+                } else {
+                    args.clone()
+                }
             } else {
-                args.clone()
+                String::new()
             };
 
             log::debug!(
                 "⚠️  Tool '{}' requires confirmation. Args: {}",
                 tool_name,
-                preview
+                &args[..args.len().min(200)]
             );
 
             let interactive_terminal = has_interactive_terminal();
@@ -1187,7 +1226,7 @@ impl Agent {
                 }
                 None => {
                     // Prompt user interactively
-                    confirm_action_default(tool_name, &preview)
+                    confirm_action_default(tool_name, &fallback_preview, rich_display.as_deref())
                 }
             };
 
@@ -1579,7 +1618,12 @@ impl Agent {
                     if attempt == 0 {
                         // Attempt 0: flush insights + multi-stage LLM compaction
                         self.flush_session_to_memory(messages).await;
-                        self.compact_conversation_history(messages, session_id).await;
+                        if self.compact_conversation_history(messages, session_id).await {
+                            if let Some(ref store) = self.session_store {
+                                let to_save: Vec<ChatMessage> = messages.iter().skip(1).cloned().collect();
+                                store.rewrite_session_messages(session_id, &to_save).ok();
+                            }
+                        }
                     } else if attempt == 1 {
                         // Attempt 1: truncate oversized tool results + compact again
                         let max_chars = calculate_max_tool_result_chars(
@@ -1590,11 +1634,20 @@ impl Agent {
                                 msg.content = truncate_tool_result(&msg.content, max_chars);
                             }
                         }
-                        self.compact_conversation_history(messages, session_id).await;
+                        if self.compact_conversation_history(messages, session_id).await {
+                            if let Some(ref store) = self.session_store {
+                                let to_save: Vec<ChatMessage> = messages.iter().skip(1).cloned().collect();
+                                store.rewrite_session_messages(session_id, &to_save).ok();
+                            }
+                        }
                     } else {
                         // Attempt 2: aggressive history trim — last resort
                         let budget = (self.config.context_window_tokens as f64 * 0.4) as usize;
                         *messages = truncate_history(messages, budget, 2);
+                        if let Some(ref store) = self.session_store {
+                            let to_save: Vec<ChatMessage> = messages.iter().skip(1).cloned().collect();
+                            store.rewrite_session_messages(session_id, &to_save).ok();
+                        }
                     }
                 }
                 Err(e) => return Err(e),
@@ -1646,7 +1699,12 @@ impl Agent {
                     if attempt == 0 {
                         // Attempt 0: flush insights + multi-stage LLM compaction
                         self.flush_session_to_memory(messages).await;
-                        self.compact_conversation_history(messages, session_id).await;
+                        if self.compact_conversation_history(messages, session_id).await {
+                            if let Some(ref store) = self.session_store {
+                                let to_save: Vec<ChatMessage> = messages.iter().skip(1).cloned().collect();
+                                store.rewrite_session_messages(session_id, &to_save).ok();
+                            }
+                        }
                     } else if attempt == 1 {
                         // Attempt 1: truncate oversized tool results + compact again
                         let max_chars = calculate_max_tool_result_chars(
@@ -1657,11 +1715,20 @@ impl Agent {
                                 msg.content = truncate_tool_result(&msg.content, max_chars);
                             }
                         }
-                        self.compact_conversation_history(messages, session_id).await;
+                        if self.compact_conversation_history(messages, session_id).await {
+                            if let Some(ref store) = self.session_store {
+                                let to_save: Vec<ChatMessage> = messages.iter().skip(1).cloned().collect();
+                                store.rewrite_session_messages(session_id, &to_save).ok();
+                            }
+                        }
                     } else {
                         // Attempt 2: aggressive history trim — last resort
                         let budget = (self.config.context_window_tokens as f64 * 0.4) as usize;
                         *messages = truncate_history(messages, budget, 2);
+                        if let Some(ref store) = self.session_store {
+                            let to_save: Vec<ChatMessage> = messages.iter().skip(1).cloned().collect();
+                            store.rewrite_session_messages(session_id, &to_save).ok();
+                        }
                     }
                 }
                 Err(e) => return Err(e),

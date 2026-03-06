@@ -5,7 +5,6 @@ use std::path::Path;
 
 use zapclaw_core::agent::Tool;
 use zapclaw_core::confiner::Confiner;
-use crate::confirmation::confirm_action;
 
 /// Precise file editing tool — search/replace within files.
 ///
@@ -44,7 +43,24 @@ impl Tool for EditTool {
     }
 
     fn requires_confirmation(&self) -> bool {
-        false
+        true
+    }
+
+    fn confirmation_display(&self, arguments: &str) -> Option<String> {
+        let args: EditArgs = serde_json::from_str(arguments).ok()?;
+        let mut display = String::new();
+        display.push_str("\n\x1b[1m✏️  Edit Confirmation\x1b[0m\n");
+        display.push_str("────────────────────────────────────────────────────\n");
+        display.push_str(&format!("  File:  {}\n", args.file));
+        display.push_str("  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─\n");
+        for line in args.old_text.lines() {
+            display.push_str(&format!("  \x1b[31m- {}\x1b[0m\n", line));
+        }
+        for line in args.new_text.lines() {
+            display.push_str(&format!("  \x1b[32m+ {}\x1b[0m\n", line));
+        }
+        display.push_str("────────────────────────────────────────────────────");
+        Some(display)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -123,23 +139,6 @@ impl Tool for EditTool {
         if new_content == content {
             return Ok("No changes made (old_text equals new_text).".to_string());
         }
-
-        // -- diff preview + confirmation --
-        println!("\n\x1b[1m✏️    Edit Confirmation\x1b[0m");
-        println!("────────────────────────────────────────────────────");
-        println!("  File:  {}", args.file);
-        println!("  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─");
-        for line in args.old_text.lines() {
-            println!("  \x1b[31m- {}\x1b[0m", line);
-        }
-        for line in args.new_text.lines() {
-            println!("  \x1b[32m+ {}\x1b[0m", line);
-        }
-        println!("────────────────────────────────────────────────────");
-        if !confirm_action("edit_tool", &args.file) {
-            anyhow::bail!("Edit of '{}' denied by user.", args.file);
-        }
-        // -- end confirmation --
 
         // Atomic write
         tokio::fs::write(&file_path, &new_content)
