@@ -51,6 +51,44 @@ fn confirm_action_default(tool_name: &str, description: &str, rich_display: Opti
     matches!(answer.as_str(), "y" | "yes")
 }
 
+async fn send_confirmation_lifecycle(
+    tx: Option<&tokio::sync::mpsc::Sender<crate::llm::StreamChunk>>,
+    phase: &str,
+) {
+    if let Some(tx) = tx {
+        if phase == "confirmation_start" {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let sent = tx
+                .send(crate::llm::StreamChunk::ConfirmationStart { ready: ready_tx })
+                .await
+                .is_ok();
+            if sent {
+                let _ = ready_rx.await;
+            }
+        } else if phase == "confirmation_end" {
+            let _ = tx.send(crate::llm::StreamChunk::ConfirmationEnd).await;
+        }
+    }
+}
+
+async fn confirm_action_with_lifecycle(
+    tool_name: &str,
+    description: &str,
+    rich_display: Option<&str>,
+    tx: Option<&tokio::sync::mpsc::Sender<crate::llm::StreamChunk>>,
+) -> bool {
+    send_confirmation_lifecycle(tx, "confirmation_start").await;
+    let approved = confirm_action_default(tool_name, description, rich_display);
+    send_confirmation_lifecycle(tx, "confirmation_end").await;
+    approved
+}
+
+async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// Returns true when stdin/stdout are interactive terminals.
 fn has_interactive_terminal() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
@@ -716,7 +754,7 @@ impl Agent {
             // Execute each tool call
             for tool_call in &response.tool_calls {
                 let tool_result = self
-                    .execute_tool_call(tool_call, &recent_tool_outputs)
+                    .execute_tool_call(tool_call, &recent_tool_outputs, None)
                     .await
                     .unwrap_or_else(|e| format!("Error: {}", e));
 
@@ -1003,7 +1041,7 @@ impl Agent {
                 }).await;
 
                 let tool_result = self
-                    .execute_tool_call(tool_call, &recent_tool_outputs)
+                    .execute_tool_call(tool_call, &recent_tool_outputs, Some(&tx))
                     .await
                     .unwrap_or_else(|e| format!("Error: {}", e));
 
@@ -1061,7 +1099,12 @@ impl Agent {
     }
 
     /// Execute a single tool call with safety checks and result truncation.
-    async fn execute_tool_call(&self, tool_call: &ToolCall, recent_outputs: &VecDeque<String>) -> Result<String> {
+    async fn execute_tool_call(
+        &self,
+        tool_call: &ToolCall,
+        recent_outputs: &VecDeque<String>,
+        tx: Option<&tokio::sync::mpsc::Sender<crate::llm::StreamChunk>>,
+    ) -> Result<String> {
         let tool_name = &tool_call.function.name;
 
         // Look up the tool
@@ -1123,6 +1166,7 @@ impl Agent {
                             }
                             None => {
                                 // Prompt user with exact preview
+                                send_confirmation_lifecycle(tx, "confirmation_start").await;
                                 println!("\n🔒 ─── Egress Confirmation Required ─────────────────");
                                 println!("  Tool: {}", tool_name);
                                 println!("  Risk: MEDIUM");
@@ -1136,12 +1180,14 @@ impl Agent {
                                 io::stdout().flush().unwrap();
 
                                 let mut input = String::new();
-                                if io::stdin().read_line(&mut input).is_err() {
+                                let approved = if io::stdin().read_line(&mut input).is_err() {
                                     false
                                 } else {
                                     let answer = input.trim().to_lowercase();
                                     matches!(answer.as_str(), "y" | "yes")
-                                }
+                                };
+                                send_confirmation_lifecycle(tx, "confirmation_end").await;
+                                approved
                             }
                         };
 
@@ -1226,7 +1272,12 @@ impl Agent {
                 }
                 None => {
                     // Prompt user interactively
-                    confirm_action_default(tool_name, &fallback_preview, rich_display.as_deref())
+                    confirm_action_with_lifecycle(
+                        tool_name,
+                        &fallback_preview,
+                        rich_display.as_deref(),
+                        tx,
+                    ).await
                 }
             };
 
@@ -1256,12 +1307,19 @@ impl Agent {
         let arguments = tool_call.function.arguments.clone();
         let tool_ref = Arc::clone(tool);
 
-        let result = tokio::time::timeout(timeout, async move {
-            tool_ref.execute(&arguments).await
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("Tool '{}' timed out after {}s", tool_name, self.config.tool_timeout_secs))?
-        .context(format!("Tool '{}' execution failed", tool_name))?;
+        let cancel = Arc::clone(&self.cancel);
+        let result = tokio::select! {
+            result = tokio::time::timeout(timeout, async move {
+                tool_ref.execute(&arguments).await
+            }) => {
+                result
+                    .map_err(|_| anyhow::anyhow!("Tool '{}' timed out after {}s", tool_name, self.config.tool_timeout_secs))?
+                    .context(format!("Tool '{}' execution failed", tool_name))?
+            }
+            _ = wait_for_cancel(cancel) => {
+                anyhow::bail!("Tool '{}' cancelled by user", tool_name);
+            }
+        };
 
         // Hard-cap tool results at HARD_MAX_TOOL_RESULT_CHARS (matching OpenClaw's
         // session-tool-result-guard). This is a fixed ceiling, NOT context-window-
@@ -1607,7 +1665,15 @@ impl Agent {
                 self.config.context_window_tokens,
             );
 
-            match self.llm.complete(messages, tool_defs).await {
+            let cancel = Arc::clone(&self.cancel);
+            let llm_result = tokio::select! {
+                result = self.llm.complete(messages, tool_defs) => result,
+                _ = wait_for_cancel(cancel) => {
+                    anyhow::bail!("Agent run cancelled during LLM request");
+                }
+            };
+
+            match llm_result {
                 Ok(resp) => return Ok(resp),
                 Err(e) if is_context_overflow_error(&e) && attempt < MAX_OVERFLOW_RETRIES => {
                     log::warn!(
@@ -1688,7 +1754,18 @@ impl Agent {
                 self.config.context_window_tokens,
             );
 
-            match self.llm.complete_stream(messages, tool_defs, tx.clone()).await {
+            let cancel = Arc::clone(&self.cancel);
+            let llm_result = tokio::select! {
+                result = self.llm.complete_stream(messages, tool_defs, tx.clone()) => result,
+                _ = wait_for_cancel(cancel) => {
+                    let _ = tx.send(crate::llm::StreamChunk::LifecycleEvent {
+                        phase: "cancelled".to_string(),
+                    }).await;
+                    anyhow::bail!("Agent run cancelled during streaming LLM request");
+                }
+            };
+
+            match llm_result {
                 Ok(resp) => return Ok(resp),
                 Err(e) if is_context_overflow_error(&e) && attempt < MAX_OVERFLOW_RETRIES => {
                     log::warn!(

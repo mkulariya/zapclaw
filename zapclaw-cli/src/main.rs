@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 use std::io::IsTerminal;
 use std::borrow::Cow;
+use std::io::Read;
 
 /// When true, log output clears the prompt line and reprints it after the message
 /// so background warnings never corrupt the prompt.
@@ -53,6 +54,120 @@ impl std::io::Write for CleanLineWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         std::io::Write::flush(&mut std::io::stderr().lock())
     }
+}
+
+struct EscCancelWatcher {
+    stop: Arc<AtomicBool>,
+    raw_active: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl EscCancelWatcher {
+    fn start(cancel: Arc<AtomicBool>, paused: Arc<AtomicBool>) -> Option<Self> {
+        if !std::io::stdin().is_terminal() {
+            return None;
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let raw_active = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+        let raw_active_for_thread = Arc::clone(&raw_active);
+        let handle = tokio::task::spawn_blocking(move || {
+            esc_cancel_loop(cancel, paused, stop_for_thread, raw_active_for_thread);
+        });
+
+        Some(Self { stop, raw_active, handle })
+    }
+
+    async fn stop(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.handle.await;
+    }
+}
+
+struct TerminalModeGuard {
+    original: libc::termios,
+    raw_active: bool,
+    raw_state: Arc<AtomicBool>,
+}
+
+impl TerminalModeGuard {
+    fn new(raw_state: Arc<AtomicBool>) -> Option<Self> {
+        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+        let rc = unsafe { libc::tcgetattr(libc::STDIN_FILENO, original.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        Some(Self {
+            original: unsafe { original.assume_init() },
+            raw_active: false,
+            raw_state,
+        })
+    }
+
+    fn set_raw(&mut self) {
+        if self.raw_active {
+            return;
+        }
+        let mut raw = self.original;
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        raw.c_cc[libc::VMIN] = 0;
+        raw.c_cc[libc::VTIME] = 1;
+        let rc = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) };
+        if rc == 0 {
+            self.raw_active = true;
+            self.raw_state.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn restore(&mut self) {
+        if self.raw_active {
+            let _ = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original) };
+            self.raw_active = false;
+            self.raw_state.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+fn esc_cancel_loop(
+    cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    raw_active: Arc<AtomicBool>,
+) {
+    let Some(mut terminal_mode) = TerminalModeGuard::new(raw_active) else {
+        return;
+    };
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 1];
+
+    while !stop.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
+        if paused.load(Ordering::Relaxed) {
+            terminal_mode.restore();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+
+        terminal_mode.set_raw();
+        match stdin.read(&mut buf) {
+            Ok(1) if buf[0] == 0x1b => {
+                cancel.store(true, Ordering::Relaxed);
+                eprintln!("\nCancelling run...");
+                break;
+            }
+            Ok(_) => {}
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
+    }
+
+    terminal_mode.restore();
 }
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
@@ -516,8 +631,12 @@ async fn run_with_streaming(
             eprintln!("\n⛔ Cancelling run...");
         }
     });
+    let input_paused = Arc::new(AtomicBool::new(false));
+    let esc_watcher = EscCancelWatcher::start(Arc::clone(&cancel), Arc::clone(&input_paused));
+    let esc_raw_active = esc_watcher.as_ref().map(|watcher| Arc::clone(&watcher.raw_active));
 
     // Spawn task to handle streaming output with spinner animation
+    let input_paused_for_print = Arc::clone(&input_paused);
     let print_handle = tokio::spawn(async move {
         use std::io::{self, Write};
         use std::time::Duration;
@@ -589,6 +708,24 @@ async fn run_with_streaming(
                             println!("\n[Run cancelled]");
                             break;
                         }
+                        Some(StreamChunk::ConfirmationStart { ready }) => {
+                            if spinner_active {
+                                print!("\r\x1b[2K");
+                                stdout.flush().ok();
+                            }
+                            spinner_active = false;
+                            input_paused_for_print.store(true, Ordering::Relaxed);
+                            if let Some(raw_active) = &esc_raw_active {
+                                while raw_active.load(Ordering::Relaxed) {
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                }
+                            }
+                            let _ = ready.send(());
+                        }
+                        Some(StreamChunk::ConfirmationEnd) => {
+                            input_paused_for_print.store(false, Ordering::Relaxed);
+                            spinner_active = true;
+                        }
                         Some(StreamChunk::LifecycleEvent { .. }) => {
                             // Other lifecycle events — silent for now
                         }
@@ -616,9 +753,9 @@ async fn run_with_streaming(
                     frame_idx += 1;
                     let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
                     if let Some(ref tool_name) = current_tool {
-                        print!("\r\x1b[2K  \x1b[2m{} {}\x1b[0m", frame, tool_name);
+                        print!("\r\x1b[2K  \x1b[2m{} {} (press ESC to stop)\x1b[0m", frame, tool_name);
                     } else {
-                        print!("\r\x1b[2m🦞 {}\x1b[0m", frame);
+                        print!("\r\x1b[2m🦞 {} Working... (press ESC to stop)\x1b[0m", frame);
                     }
                     stdout.flush().ok();
                 }
@@ -631,6 +768,9 @@ async fn run_with_streaming(
 
     // Stop the Ctrl+C handler and reset cancel flag so future runs start clean.
     ctrlc_handle.abort();
+    if let Some(watcher) = esc_watcher {
+        watcher.stop().await;
+    }
     cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
     // Wait for print task to finish

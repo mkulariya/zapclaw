@@ -3418,6 +3418,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "env_logger",
+ "libc",
  "log",
  "reqwest",
  "rustyline",

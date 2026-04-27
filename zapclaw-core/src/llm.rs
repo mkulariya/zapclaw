@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use tokio::sync::mpsc;
 
 /// Messages for LLM conversations.
@@ -116,7 +117,7 @@ pub struct TokenUsage {
 
 /// Streaming chunk — emitted token-by-token during SSE streaming.
 /// Matches OpenClaw's streaming architecture with full event types.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum StreamChunk {
     /// Text content delta
     TextDelta(String),
@@ -145,6 +146,13 @@ pub enum StreamChunk {
     LifecycleEvent {
         phase: String, // "start", "end", "error", "step"
     },
+    /// Core is about to read a blocking confirmation prompt from stdin.
+    /// The CLI must pause terminal rendering/input watchers, then acknowledge.
+    ConfirmationStart {
+        ready: tokio::sync::oneshot::Sender<()>,
+    },
+    /// Blocking confirmation prompt has completed.
+    ConfirmationEnd,
     /// Stream is complete; final accumulated response
     Done(LlmResponse),
 }
@@ -173,13 +181,53 @@ pub fn is_transient_llm_error(error: &anyhow::Error) -> bool {
         || msg.contains("name resolution")
         // Server-side transient errors
         || msg.contains("529")
+        || msg.contains("504")
         || msg.contains("503")
         || msg.contains("502")
+        || msg.contains("500")
         || msg.contains("429")
         || msg.contains("overloaded")
         || msg.contains("rate limit")
         || msg.contains("temporarily unavailable")
         || msg.contains("internal server error")
+}
+
+const LLM_MAX_RETRIES: usize = 5;
+
+fn llm_retry_delay(attempt: usize) -> std::time::Duration {
+    std::time::Duration::from_secs(1 << (attempt - 1))
+}
+
+async fn retry_llm_operation<T, F, Fut>(label: &str, mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut last_err: anyhow::Error = anyhow::anyhow!("{}: no attempts made", label);
+
+    for attempt in 0..LLM_MAX_RETRIES {
+        if attempt > 0 {
+            let delay = llm_retry_delay(attempt);
+            log::warn!(
+                "{} retry {}/{} in {}ms...",
+                label,
+                attempt + 1,
+                LLM_MAX_RETRIES,
+                delay.as_millis()
+            );
+            tokio::time::sleep(delay).await;
+        }
+
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(err) if is_transient_llm_error(&err) && attempt < LLM_MAX_RETRIES - 1 => {
+                last_err = err;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(last_err)
 }
 
 /// LLM client trait — abstraction over any OpenAI-compatible API.
@@ -593,22 +641,8 @@ impl LlmClient for OpenAiCompatibleClient {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse> {
-        const MAX_RETRIES: usize = 3;
-        const RETRY_DELAYS_MS: [u64; 2] = [1000, 3000];
-
-        let mut last_err: anyhow::Error = anyhow::anyhow!("LLM complete: no attempts made");
-
-        for attempt in 0..MAX_RETRIES {
-            if attempt > 0 {
-                let delay = RETRY_DELAYS_MS[attempt - 1];
-                log::warn!(
-                    "LLM inference retry {}/{} in {}ms...",
-                    attempt + 1, MAX_RETRIES, delay
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            }
-
-            let result: Result<LlmResponse> = match self.api_style {
+        retry_llm_operation("LLM inference", || async {
+            match self.api_style {
                 // ------------------------------------------------------------------
                 // Anthropic Messages API
                 // ------------------------------------------------------------------
@@ -624,16 +658,10 @@ impl LlmClient for OpenAiCompatibleClient {
                     let response = match send_result {
                         Ok(Ok(r)) => r,
                         Ok(Err(e)) => {
-                            last_err = anyhow::Error::new(e).context("Failed to send request to Anthropic API");
-                            if is_transient_llm_error(&last_err) && attempt < MAX_RETRIES - 1 {
-                                continue;
-                            }
-                            return Err(last_err);
+                            return Err(anyhow::Error::new(e).context("Failed to send request to Anthropic API"));
                         }
                         Err(_) => {
-                            last_err = anyhow::anyhow!("Anthropic API request timed out after 180s");
-                            if attempt < MAX_RETRIES - 1 { continue; }
-                            return Err(last_err);
+                            return Err(anyhow::anyhow!("Anthropic API request timed out after 180s"));
                         }
                     };
 
@@ -651,11 +679,7 @@ impl LlmClient for OpenAiCompatibleClient {
                             None
                         }.unwrap_or_else(|| format!("Anthropic API error ({}): {}", status, text));
 
-                        last_err = anyhow::anyhow!("{}", err_msg);
-                        if is_transient_llm_error(&last_err) && attempt < MAX_RETRIES - 1 {
-                            continue;
-                        }
-                        return Err(last_err);
+                        return Err(anyhow::anyhow!("{}", err_msg));
                     }
 
                     parse_anthropic_response(&text)
@@ -692,16 +716,10 @@ impl LlmClient for OpenAiCompatibleClient {
                     let response = match send_result {
                         Ok(Ok(r)) => r,
                         Ok(Err(e)) => {
-                            last_err = anyhow::Error::new(e).context("Failed to send request to LLM API");
-                            if is_transient_llm_error(&last_err) && attempt < MAX_RETRIES - 1 {
-                                continue;
-                            }
-                            return Err(last_err);
+                            return Err(anyhow::Error::new(e).context("Failed to send request to LLM API"));
                         }
                         Err(_) => {
-                            last_err = anyhow::anyhow!("LLM API request timed out after 180s");
-                            if attempt < MAX_RETRIES - 1 { continue; }
-                            return Err(last_err);
+                            return Err(anyhow::anyhow!("LLM API request timed out after 180s"));
                         }
                     };
 
@@ -718,11 +736,7 @@ impl LlmClient for OpenAiCompatibleClient {
                             format!("LLM API error ({}): {}", status, body)
                         };
 
-                        last_err = anyhow::anyhow!("{}", err_msg);
-                        if is_transient_llm_error(&last_err) && attempt < MAX_RETRIES - 1 {
-                            continue;
-                        }
-                        return Err(last_err);
+                        return Err(anyhow::anyhow!("{}", err_msg));
                     }
 
                     let completion: ChatCompletionResponse = serde_json::from_str(&body)
@@ -753,22 +767,8 @@ impl LlmClient for OpenAiCompatibleClient {
                         anthropic_blocks: Vec::new(),
                     })
                 }
-            };
-
-            // Success — return immediately
-            match result {
-                Ok(resp) => return Ok(resp),
-                Err(e) => {
-                    if is_transient_llm_error(&e) && attempt < MAX_RETRIES - 1 {
-                        last_err = e;
-                        continue;
-                    }
-                    return Err(e);
-                }
             }
-        }
-
-        Err(last_err)
+        }).await
     }
 
     async fn complete_stream(
@@ -777,9 +777,6 @@ impl LlmClient for OpenAiCompatibleClient {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamChunk>,
     ) -> Result<LlmResponse> {
-        const MAX_RETRIES: usize = 3;
-        const RETRY_DELAYS_MS: [u64; 2] = [1000, 3000];
-
         match self.api_style {
             // ------------------------------------------------------------------
             // Anthropic streaming SSE
@@ -793,49 +790,25 @@ impl LlmClient for OpenAiCompatibleClient {
 
                 // Retry only the initial send + status check; once the stream body
                 // starts, partial content may have been sent to tx — no retry.
-                let response = {
-                    let mut last_err: anyhow::Error = anyhow::anyhow!("no attempts");
-                    let mut got_response = None;
-                    for attempt in 0..MAX_RETRIES {
-                        if attempt > 0 {
-                            let delay = RETRY_DELAYS_MS[attempt - 1];
-                            log::warn!(
-                                "Anthropic stream request retry {}/{} in {}ms...",
-                                attempt + 1, MAX_RETRIES, delay
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                        }
-                        match self.anthropic_req(&url).json(&body).send().await {
-                            Ok(resp) => {
-                                let status = resp.status();
-                                if !status.is_success() {
-                                    let body_text = resp.text().await.unwrap_or_default();
-                                    let err_msg = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body_text) {
-                                        val["error"]["message"].as_str()
-                                            .map(|m| format!("Anthropic API streaming error ({}): {}", status, m))
-                                    } else {
-                                        None
-                                    }.unwrap_or_else(|| format!("Anthropic API streaming error ({}): {}", status, body_text));
-                                    last_err = anyhow::anyhow!("{}", err_msg);
-                                    if is_transient_llm_error(&last_err) && attempt < MAX_RETRIES - 1 {
-                                        continue;
-                                    }
-                                    return Err(last_err);
-                                }
-                                got_response = Some(resp);
-                                break;
+                let response = retry_llm_operation("Anthropic stream request", || async {
+                    match self.anthropic_req(&url).json(&body).send().await {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            if !status.is_success() {
+                                let body_text = resp.text().await.unwrap_or_default();
+                                let err_msg = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                                    val["error"]["message"].as_str()
+                                        .map(|m| format!("Anthropic API streaming error ({}): {}", status, m))
+                                } else {
+                                    None
+                                }.unwrap_or_else(|| format!("Anthropic API streaming error ({}): {}", status, body_text));
+                                return Err(anyhow::anyhow!("{}", err_msg));
                             }
-                            Err(e) => {
-                                last_err = anyhow::Error::new(e).context("Failed to send streaming request to Anthropic API");
-                                if is_transient_llm_error(&last_err) && attempt < MAX_RETRIES - 1 {
-                                    continue;
-                                }
-                                return Err(last_err);
-                            }
+                            Ok(resp)
                         }
+                        Err(e) => Err(anyhow::Error::new(e).context("Failed to send streaming request to Anthropic API")),
                     }
-                    got_response.ok_or(last_err)?
-                };
+                }).await?;
 
                 let mut full_content = String::new();
                 let mut tool_calls_acc: Vec<ToolCall> = Vec::new();
@@ -1185,58 +1158,33 @@ impl LlmClient for OpenAiCompatibleClient {
 
                 // Retry only the initial send + status check; once the stream body
                 // starts, partial content may have been sent to tx — no retry.
-                let response = {
-                    let mut last_err: anyhow::Error = anyhow::anyhow!("no attempts");
-                    let mut got_response = None;
-                    for attempt in 0..MAX_RETRIES {
-                        if attempt > 0 {
-                            let delay = RETRY_DELAYS_MS[attempt - 1];
-                            log::warn!(
-                                "LLM stream request retry {}/{} in {}ms...",
-                                attempt + 1, MAX_RETRIES, delay
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                        }
-
-                        let mut req_builder = self
-                            .client
-                            .post(&url)
-                            .header("Content-Type", "application/json");
-                        if let Some(ref key) = self.api_key {
-                            req_builder =
-                                req_builder.header("Authorization", format!("Bearer {}", key));
-                        }
-
-                        match req_builder.json(&body).send().await {
-                            Ok(resp) => {
-                                let status = resp.status();
-                                if !status.is_success() {
-                                    let body_text = resp.text().await.unwrap_or_default();
-                                    let err_msg = if let Ok(api_error) = serde_json::from_str::<ApiError>(&body_text) {
-                                        format!("LLM API streaming error ({}): {}", status, api_error.error.message)
-                                    } else {
-                                        format!("LLM API streaming error ({}): {}", status, body_text)
-                                    };
-                                    last_err = anyhow::anyhow!("{}", err_msg);
-                                    if is_transient_llm_error(&last_err) && attempt < MAX_RETRIES - 1 {
-                                        continue;
-                                    }
-                                    return Err(last_err);
-                                }
-                                got_response = Some(resp);
-                                break;
-                            }
-                            Err(e) => {
-                                last_err = anyhow::Error::new(e).context("Failed to send streaming request to LLM API");
-                                if is_transient_llm_error(&last_err) && attempt < MAX_RETRIES - 1 {
-                                    continue;
-                                }
-                                return Err(last_err);
-                            }
-                        }
+                let response = retry_llm_operation("LLM stream request", || async {
+                    let mut req_builder = self
+                        .client
+                        .post(&url)
+                        .header("Content-Type", "application/json");
+                    if let Some(ref key) = self.api_key {
+                        req_builder =
+                            req_builder.header("Authorization", format!("Bearer {}", key));
                     }
-                    got_response.ok_or(last_err)?
-                };
+
+                    match req_builder.json(&body).send().await {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            if !status.is_success() {
+                                let body_text = resp.text().await.unwrap_or_default();
+                                let err_msg = if let Ok(api_error) = serde_json::from_str::<ApiError>(&body_text) {
+                                    format!("LLM API streaming error ({}): {}", status, api_error.error.message)
+                                } else {
+                                    format!("LLM API streaming error ({}): {}", status, body_text)
+                                };
+                                return Err(anyhow::anyhow!("{}", err_msg));
+                            }
+                            Ok(resp)
+                        }
+                        Err(e) => Err(anyhow::Error::new(e).context("Failed to send streaming request to LLM API")),
+                    }
+                }).await?;
 
                 let mut full_content = String::new();
                 let mut tool_calls_acc: Vec<ToolCall> = Vec::new();

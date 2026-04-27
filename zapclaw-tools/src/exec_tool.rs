@@ -151,17 +151,21 @@ impl Tool for ExecTool {
         let workspace = self.confiner.workspace_root();
         let timeout_secs = args.timeout_secs.unwrap_or(30);
 
-        // Execute the command
+        // kill_on_drop ensures agent cancellation does not leave a shell command running.
+        let child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&args.command)
+            .current_dir(workspace)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("Failed to spawn command")?;
+
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(&args.command)
-                .current_dir(workspace)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .output()
+            child.wait_with_output(),
         )
         .await
         .map_err(|_| anyhow::anyhow!("Command timed out after {}s", timeout_secs))?
